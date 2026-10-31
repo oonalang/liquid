@@ -1,0 +1,6 @@
+Tests run on host Linux (not Android):
+clang++ -std=c++17 -Wno-deprecated-declarations -I src/main/jni/Includes tests/test_signed_session.cpp -lcrypto
+PASSED: signed session verification (9 assertions)
+clang++ -std=c++17 -Wno-deprecated-declarations -I src/main/jni/Includes tests/test_ethnir_auth_reply.cpp -lcrypto
+PASSED: signed-response parsing checks (8 assertions)
+ZIP integrity verified. Native Android build not run. Login with live panel not verified.
