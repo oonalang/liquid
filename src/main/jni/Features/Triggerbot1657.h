@@ -53,9 +53,22 @@ inline void (*stopFire)(void*,bool,const void*) = nullptr;
 inline bool (*isAiming)(void*,const void*) = nullptr;
 inline bool (*canFire)(void*,bool,const void*) = nullptr;
 
+// Weapon fire-mode metadata (1.6.57 Weapon, RVA from the metadata dump).
+// Reading the weapon's own flags classifies a weapon on the frame it is drawn,
+// instead of holding the trigger for several hundred milliseconds to guess from
+// the magazine count. A semi-auto that waits for that guess never fires: the
+// game only accepts one round per press, so holding the button just does nothing.
+inline bool (*weaponIsSingleFire)(void*,const void*) = nullptr;   // Weapon.IsSingleFire()
+inline bool (*weaponCanAutoFire)(void*,const void*) = nullptr;    // Weapon.get_CanAutoFire()
+inline bool (*weaponIsSingleShot)(void*,const void*) = nullptr;   // Weapon.get_IsSingleShot()
+
 inline void* lastController=nullptr;
 inline bool triggerHeldFire=false;
 inline std::int64_t fireTapStartedMs=0;
+// Clip count sampled when the current press was issued; -1 when unreadable. A
+// single-fire press is held until this drops, so a shot the game delays (the ADS
+// aim-to-fire interval) is not thrown away by an early release.
+inline std::int32_t pressAmmoBefore=-1;
 inline bool previousLocalAlive=false;
 
 
@@ -93,6 +106,7 @@ inline std::int64_t nextLegacyDiagnosticProbeMs=0;
 inline void ResetLifeState() {
     triggerHeldFire=false;
     fireTapStartedMs=0;
+    pressAmmoBefore=-1;
     fireMode=FireMode::Unknown;
     fireModeWeapon=nullptr;
     probeActive=false;
@@ -122,6 +136,21 @@ inline bool ReadClipAmmo(void* weapon, std::int32_t& value) {
     if (ammo<0 || ammo>2000) return false;
     value=ammo;
     return true;
+}
+
+// Authoritative fire-mode read. A weapon that reports itself as single-shot or
+// single-fire needs one press per round; a weapon that explicitly cannot
+// auto-fire does too (that covers semi-automatic rifles, which are the case the
+// magazine probe used to hold down). Only an explicit auto-fire capability keeps
+// the trigger held. Anything the metadata cannot answer stays Unknown so the
+// bounded magazine probe can still classify it.
+inline FireMode IdentifyFireMode(void* weapon) {
+    if (!weapon) return FireMode::Unknown;
+    const bool singleFire=weaponIsSingleFire && weaponIsSingleFire(weapon,nullptr);
+    const bool singleShot=weaponIsSingleShot && weaponIsSingleShot(weapon,nullptr);
+    if (singleFire || singleShot) return FireMode::Single;
+    if (!weaponCanAutoFire) return FireMode::Unknown;
+    return weaponCanAutoFire(weapon,nullptr) ? FireMode::Auto : FireMode::Single;
 }
 
 
@@ -221,6 +250,9 @@ inline void Initialize(std::uintptr_t unityBase) {
     diagIgnoredTriggerHits.store(0,std::memory_order_relaxed);
     isAiming=reinterpret_cast<bool (*)(void*,const void*)>(unityBase+0x519BB10);
     canFire=reinterpret_cast<bool (*)(void*,bool,const void*)>(unityBase+0x5260EC0);
+    weaponIsSingleFire=reinterpret_cast<bool (*)(void*,const void*)>(unityBase+0x50EC158);
+    weaponCanAutoFire=reinterpret_cast<bool (*)(void*,const void*)>(unityBase+0x512A0E8);
+    weaponIsSingleShot=reinterpret_cast<bool (*)(void*,const void*)>(unityBase+0x50EBA5C);
     nativeLinecastAddress=unityBase+0x506D104;
 
     nativeMaskedLinecastAddress=unityBase+0x506D07C;
@@ -860,11 +892,15 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
 
     if (fireModeWeapon!=currentWeapon) {
         fireModeWeapon=currentWeapon;
+        // The weapon metadata is read on the first accepted press below, when the
+        // weapon is fully active, rather than here where a weapon that has only just
+        // been switched to may not be initialised yet. Without a readable clip count
+        // there is nothing to probe at all, so spend the budget and go to tapping.
         fireMode=FireMode::Unknown;
         probeActive=false;
         probeRetryAfterMs=0;
-        probeFailures=0;
-        diagProbeSpent.store(false,std::memory_order_relaxed);
+        probeFailures=!getClipAmmo ? kMaxProbeAttempts : 0;
+        diagProbeSpent.store(probeFailures>=kMaxProbeAttempts,std::memory_order_relaxed);
         if (triggerHeldFire && stopFire) {
             stopFire(self,true,nullptr);
             triggerHeldFire=false;
@@ -886,14 +922,26 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
 
     const auto now=NowMs();
     std::int32_t ammoForProbe=0;
+    auto probeWanted=[&]() {
+        return fireMode==FireMode::Unknown &&
+            probeFailures<kMaxProbeAttempts && now>=probeRetryAfterMs;
+    };
     if (shouldFire && !triggerHeldFire) {
+        // Classify from the weapon itself on the first accepted press, so a
+        // semi-automatic taps from the start instead of holding fire to probe the
+        // magazine. If the metadata cannot answer, the bounded probe below decides.
+        if (fireMode==FireMode::Unknown) {
+            const FireMode identified=IdentifyFireMode(const_cast<void*>(currentWeapon));
+            if (identified!=FireMode::Unknown) {
+                fireMode=identified;
+                probeActive=false;
+                diagFireMode.store(static_cast<unsigned>(identified),std::memory_order_relaxed);
+            }
+        }
+        const bool ammoAtPress=ReadClipAmmo(const_cast<void*>(currentWeapon),ammoForProbe);
+        const bool canProbe=probeWanted() && ammoAtPress;
 
-
-        std::int32_t ammo=0;
-        const bool canProbe=fireMode==FireMode::Unknown &&
-            probeFailures<kMaxProbeAttempts && now>=probeRetryAfterMs &&
-            ReadClipAmmo(const_cast<void*>(currentWeapon),ammo);
-
+        pressAmmoBefore=ammoAtPress ? ammoForProbe : -1;
         startFire(self,nullptr);
         triggerHeldFire=true;
         fireTapStartedMs=now;
@@ -903,10 +951,15 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
 
             probeActive=true;
             probeStartedMs=now;
-            probeBefore=ammo;
-            probeMid=ammo;
+            probeBefore=ammoForProbe;
+            probeMid=ammoForProbe;
             probeMidTaken=false;
             diagProbes.fetch_add(1,std::memory_order_relaxed);
+        } else if (probeWanted()) {
+            // No readable clip count: spend the budget so the tap fallback owns the
+            // trigger instead of holding fire forever on an unclassified weapon.
+            probeFailures=kMaxProbeAttempts;
+            diagProbeSpent.store(true,std::memory_order_relaxed);
         }
         Report(DiagnosticStage::FireRequested);
     } else if (!shouldFire && triggerHeldFire) {
@@ -915,6 +968,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         // is what made the next shot feel delayed, so release instantly instead.
         stopFire(self,true,nullptr);
         triggerHeldFire=false;
+        pressAmmoBefore=-1;
         if (probeActive) {
 
             probeActive=false;
@@ -937,6 +991,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
                 if (verdict==FireMode::Single) {
                     stopFire(self,true,nullptr);
                     triggerHeldFire=false;
+                    pressAmmoBefore=-1;
                     diagFireTaps.fetch_add(1,std::memory_order_relaxed);
                 }
                 if (verdict==FireMode::Unknown) {
@@ -952,17 +1007,23 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             } else {
                 Report(DiagnosticStage::FireModeProbe);
             }
-        } else if (fireMode==FireMode::Unknown &&
-                   probeFailures<kMaxProbeAttempts && now>=probeRetryAfterMs &&
-                   ReadClipAmmo(const_cast<void*>(currentWeapon),ammoForProbe)) {
+        } else if (probeWanted()) {
             // While the trigger stays held there is no new StartFire to hang a probe on,
             // so a retry starts on the held trigger instead of releasing the weapon.
-            probeActive=true;
-            probeStartedMs=now;
-            probeBefore=ammoForProbe;
-            probeMid=ammoForProbe;
-            probeMidTaken=false;
-            diagProbes.fetch_add(1,std::memory_order_relaxed);
+            if (ReadClipAmmo(const_cast<void*>(currentWeapon),ammoForProbe)) {
+                probeActive=true;
+                probeStartedMs=now;
+                probeBefore=ammoForProbe;
+                probeMid=ammoForProbe;
+                probeMidTaken=false;
+                diagProbes.fetch_add(1,std::memory_order_relaxed);
+            } else {
+                // The magazine cannot be read, so no probe can ever succeed. Fall back
+                // to tapping rather than holding a trigger that will never shoot.
+                probeFailures=kMaxProbeAttempts;
+                probeRetryAfterMs=now+probeRetryMs;
+                diagProbeSpent.store(true,std::memory_order_relaxed);
+            }
             Report(DiagnosticStage::FireModeProbe);
         } else if (fireMode==FireMode::Auto ||
                    (fireMode==FireMode::Unknown && probeFailures<kMaxProbeAttempts)) {
@@ -974,16 +1035,30 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             // still tap below; a weapon that never classifies falls back to tapping so it
             // keeps shooting at all.
             Report(DiagnosticStage::FireHeld);
-        } else if (now-fireTapStartedMs >= tapHoldMs) {
-
-
-
-            stopFire(self,true,nullptr);
-            triggerHeldFire=false;
-            diagFireTaps.fetch_add(1,std::memory_order_relaxed);
-            Report(DiagnosticStage::FireTapped);
         } else {
-            Report(DiagnosticStage::FireHeld);
+            // Single-fire weapon: one round per press, so the press has to be released
+            // before the next one. Release as soon as the round has left the weapon
+            // (clip count dropped), not after a fixed hold: during the ADS aim-to-fire
+            // interval the game delivers the shot later, and releasing first threw the
+            // shot away - which is what made ADS firing feel delayed. If the clip cannot
+            // be read, or the weapon reports it is ready to fire again (the press did
+            // nothing), release at the old minimum hold; kMaxTapHoldMs bounds a press
+            // the game never answers so the trigger cannot stay stuck down.
+            const std::int64_t held=now-fireTapStartedMs;
+            std::int32_t ammoNow=0;
+            const bool delivered=pressAmmoBefore>=0 &&
+                ReadClipAmmo(const_cast<void*>(currentWeapon),ammoNow) &&
+                ammoNow<pressAmmoBefore;
+            if (delivered || held>=kMaxTapHoldMs ||
+                (held>=tapHoldMs && (pressAmmoBefore<0 || canFire(local,false,nullptr)))) {
+                stopFire(self,true,nullptr);
+                triggerHeldFire=false;
+                pressAmmoBefore=-1;
+                diagFireTaps.fetch_add(1,std::memory_order_relaxed);
+                Report(DiagnosticStage::FireTapped);
+            } else {
+                Report(DiagnosticStage::FireHeld);
+            }
         }
     }
 }

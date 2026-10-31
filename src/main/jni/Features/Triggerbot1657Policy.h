@@ -75,6 +75,12 @@ constexpr unsigned kMaxOriginReadFailures = 8;
 constexpr unsigned kMaxProbeAttempts = 2;
 constexpr std::int64_t kMaximumUiAgeMs = 350;
 
+// A single-fire press is normally released as soon as its round is consumed, but
+// the game can take a moment (the ADS aim-to-fire interval) before it delivers the
+// shot. Hold the press for at most this long so the trigger can never stay stuck
+// down if the weapon never answers, while still giving a delayed shot its chance.
+constexpr std::int64_t kMaxTapHoldMs = 400;
+
 
 
 inline bool WithinRange(float worldDistance) {

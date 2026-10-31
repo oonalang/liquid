@@ -9,7 +9,7 @@ namespace Triggerbot1657 {
 
 
 
-inline constexpr const char* kDiagnosticBuildLabel = "1657-r26 / single-trace LOS, instant fire";
+inline constexpr const char* kDiagnosticBuildLabel = "1657-r27 / weapon fire-mode, ammo-confirmed taps";
 
 
 

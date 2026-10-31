@@ -38,6 +38,10 @@ static Vector3 WorldToScreenPoint(Vector3 p){return {p.x*projectionScale,p.y*pro
 static bool physicsBlocked=false,smokeBlocked=false,endpointSmoke=false,ready=true,ads=false;
 static int probeAmmo=30;
 static int GetClipAmmo(void*,const void*) { return probeAmmo; }
+static bool mockSingleFire=false,mockSingleShot=false,mockCanAutoFire=true;
+static bool MockIsSingleFire(void*,const void*) { return mockSingleFire; }
+static bool MockIsSingleShot(void*,const void*) { return mockSingleShot; }
+static bool MockCanAutoFire(void*,const void*) { return mockCanAutoFire; }
 static void* enemyObject=nullptr;
 static Transform* enemyObjectTransform=nullptr;
 static Collider* hitCollider=nullptr;
@@ -561,24 +565,31 @@ int main() {
     Triggerbot1657::physicsLinecast=&Linecast;
     hitCollider=nullptr;hitDistance=-1.f;physicsBlocked=false;
     Triggerbot1657::tapHoldMs=0;
-    // An unclassified weapon is held (no artificial burst/release cycle).
+    // An unclassifiable weapon with no readable clip cannot ever be probed, so it
+    // falls back to tapping instead of holding a trigger that never fires again.
     Triggerbot1657::fireMode=Triggerbot1657::FireMode::Unknown;
     const auto startsBeforeHold=startCalls,stopsBeforeHold=stopCalls;
-    for (int i=0;i<4;++i) tick();
+    tick();
     assert(startCalls==startsBeforeHold+1 && Triggerbot1657::triggerHeldFire);
-    assert(stopCalls==stopsBeforeHold);
-    assert(Triggerbot1657::diagStage.load()==static_cast<unsigned>(Triggerbot1657::DiagnosticStage::FireHeld));
-    physicsBlocked=true;tick();physicsBlocked=false;
+    assert(Triggerbot1657::diagProbeSpent.load());
+    tick();
     assert(stopCalls==stopsBeforeHold+1 && !Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::diagStage.load()==static_cast<unsigned>(Triggerbot1657::DiagnosticStage::FireTapped));
+    tick();
+    assert(startCalls==startsBeforeHold+2 && Triggerbot1657::triggerHeldFire);
+    physicsBlocked=true;tick();physicsBlocked=false;
+    assert(stopCalls==stopsBeforeHold+2 && !Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::diagStage.load()==static_cast<unsigned>(Triggerbot1657::DiagnosticStage::FireReleased));
 
     // Verified single-fire weapons still tap so the next round can be requested.
     Triggerbot1657::fireMode=Triggerbot1657::FireMode::Single;
     const auto startsBeforeTaps=startCalls,stopsBeforeTaps=stopCalls;
+    const auto tapsBeforeTaps=Triggerbot1657::diagFireTaps.load();
     tick();
     assert(startCalls==startsBeforeTaps+1 && Triggerbot1657::triggerHeldFire);
     tick();
     assert(stopCalls==stopsBeforeTaps+1 && !Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::diagFireTaps.load()==1);
+    assert(Triggerbot1657::diagFireTaps.load()==tapsBeforeTaps+1);
     assert(Triggerbot1657::diagStage.load()==static_cast<unsigned>(Triggerbot1657::DiagnosticStage::FireTapped));
     tick();
     assert(startCalls==startsBeforeTaps+2);
@@ -598,6 +609,10 @@ int main() {
     Triggerbot1657::probeMidMs=0;
     Triggerbot1657::probeEndMs=1000000;
     Triggerbot1657::probeRetryMs=0;
+    // The probe budget was spent above when the clip was unreadable; a weapon swap
+    // resets it in the live code, so do the same here before probing again.
+    Triggerbot1657::probeFailures=0;
+    Triggerbot1657::diagProbeSpent.store(false);
     probeAmmo=30;
 
     const auto idleProbes=Triggerbot1657::diagProbes.load();
@@ -652,11 +667,79 @@ int main() {
     Pawn::equipped=&thirdWeapon;
     Triggerbot1657::getClipAmmo=nullptr;
     tick();
+    const auto stopsBeforeThird=stopCalls;
     assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
     assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
     tick();
-    assert(Triggerbot1657::triggerHeldFire); // unclassifiable weapon stays held, no gap
+    assert(!Triggerbot1657::triggerHeldFire); // no readable clip: tap, never an endless hold
+    assert(stopCalls==stopsBeforeThird+1);
     assert(Triggerbot1657::diagProbes.load()==probesAfterAuto);
+
+    // Weapon metadata classifies on the frame the weapon is drawn. A semi-automatic
+    // rifle taps from its very first press instead of holding fire to probe the mag.
+    int semiWeapon=9001;
+    Pawn::equipped=&semiWeapon;
+    Triggerbot1657::weaponIsSingleFire=&MockIsSingleFire;
+    Triggerbot1657::weaponIsSingleShot=&MockIsSingleShot;
+    Triggerbot1657::weaponCanAutoFire=&MockCanAutoFire;
+    mockSingleFire=false;mockSingleShot=true;mockCanAutoFire=false;
+    Triggerbot1657::tapHoldMs=0;
+    const auto startsBeforeSemi=startCalls,stopsBeforeSemi=stopCalls;
+    const auto probesBeforeSemi=Triggerbot1657::diagProbes.load();
+    tick();
+    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Single);
+    assert(Triggerbot1657::diagFireMode.load()==1);
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
+    tick();
+    assert(stopCalls==stopsBeforeSemi+1 && !Triggerbot1657::triggerHeldFire);
+    assert(startCalls==startsBeforeSemi+1);
+    assert(Triggerbot1657::diagProbes.load()==probesBeforeSemi); // no magazine probe
+
+    // An automatic weapon is classified the same way and held without probing.
+    int autoWeapon=9002;
+    Pawn::equipped=&autoWeapon;
+    mockSingleFire=false;mockSingleShot=false;mockCanAutoFire=true;
+    Triggerbot1657::getClipAmmo=&GetClipAmmo;
+    probeAmmo=30;
+    tick();
+    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Auto);
+    assert(Triggerbot1657::diagFireMode.load()==2);
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
+    tick();tick();tick();
+    assert(Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::diagProbes.load()==probesBeforeSemi);
+
+    // No single-shot flag, but the weapon cannot auto-fire: still a tap weapon.
+    int tapWeapon=9003;
+    Pawn::equipped=&tapWeapon;
+    mockSingleFire=false;mockSingleShot=false;mockCanAutoFire=false;
+    tick();
+    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Single);
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire);
+
+    // A single-fire press is held until its round is consumed, so a shot the game
+    // delays (the ADS aim-to-fire interval) is not cancelled by an early release.
+    int delayedWeapon=9004;
+    Pawn::equipped=&delayedWeapon;
+    mockSingleFire=false;mockSingleShot=true;mockCanAutoFire=false;
+    Triggerbot1657::tapHoldMs=100000;
+    probeAmmo=30;
+    tick();
+    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::pressAmmoBefore==30);
+    tick();tick();
+    assert(Triggerbot1657::triggerHeldFire); // the round has not been consumed yet
+    probeAmmo=29;
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire); // released as soon as the round left
+    Triggerbot1657::tapHoldMs=0;
+    Triggerbot1657::weaponIsSingleFire=nullptr;
+    Triggerbot1657::weaponIsSingleShot=nullptr;
+    Triggerbot1657::weaponCanAutoFire=nullptr;
+    Triggerbot1657::getClipAmmo=nullptr;
+    Pawn::equipped=&thirdWeapon;
+    tick();
 
 
 
