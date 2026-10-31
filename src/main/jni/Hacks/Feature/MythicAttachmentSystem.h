@@ -31,17 +31,29 @@ std::vector<void*> weaponSkinConfigInstance;
 std::vector<void*> attachmentConfInstance;
 inline std::mutex mythicCollectorMutex;
 
+// Bounded: captured instances live for the whole process and the game keeps creating
+// configs, so an unbounded list made every scan and fingerprint pass slower the
+// longer a session ran.
+inline constexpr size_t kMaxWeaponSkinConfigs = 512;
+
 inline void CollectWeaponSkinConfig(void* instance) {
     if (!instance) return;
     std::lock_guard<std::mutex> lock(mythicCollectorMutex);
+    if (weaponSkinConfigInstance.size() >= kMaxWeaponSkinConfigs) return;
     if (std::find(weaponSkinConfigInstance.begin(), weaponSkinConfigInstance.end(), instance) == weaponSkinConfigInstance.end())
         weaponSkinConfigInstance.push_back(instance);
+}
+
+inline size_t WeaponSkinConfigCount() {
+    std::lock_guard<std::mutex> lock(mythicCollectorMutex);
+    return weaponSkinConfigInstance.size();
 }
 
 inline std::vector<void*> SnapshotWeaponSkinConfigs() {
     std::lock_guard<std::mutex> lock(mythicCollectorMutex);
     return weaponSkinConfigInstance;
 }
+
 
 inline std::vector<void*> SnapshotWeaponPartAssets() {
     std::lock_guard<std::mutex> lock(mythicCollectorMutex);

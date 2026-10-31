@@ -36,6 +36,7 @@ static float projectionScale=1.f;
 static Vector3 WorldToScreenPoint(Vector3 p){return {p.x*projectionScale,p.y*projectionScale,p.z};}
 #include "Features/Triggerbot1657.h"
 static bool physicsBlocked=false,smokeBlocked=false,endpointSmoke=false,ready=true,ads=false;
+static bool readyIgnoringModeTransition=false;
 static int probeAmmo=30;
 static int GetClipAmmo(void*,const void*) { return probeAmmo; }
 static bool mockSingleFire=false,mockSingleShot=false,mockCanAutoFire=true;
@@ -52,7 +53,9 @@ static void StartFire(void*,const void*) { ++startCalls; }
 static void StopFire(void*,bool,const void*) { ++stopCalls; }
 static void UpdatePawn(void*,float,const void*) { ++updateCalls; }
 static bool Aim(void*,const void*) { return ads; }
-static bool CanFire(void*,bool,const void*) { return ready; }
+static bool CanFire(void*,bool ignoreTransition,const void*) {
+    return ready || (ignoreTransition && readyIgnoringModeTransition);
+}
 static Vector3 lastFrom{};
 static Vector3 firePoint{5,5,6},eyePoint{4.5f,5,6};
 static bool fireOriginBlocked=false,eyeOriginBlocked=false;
@@ -1089,4 +1092,79 @@ int main() {
     assert(!EnemyListSnapshot1657::Read(&enemies,validListPointer,snapshot));
     enemyArray.length=1;
     assert(EnemyListSnapshot1657::Read(&enemies,validListPointer,snapshot));
+
+    // --- r28: scope transition, empty magazine, ADS origin order ---
+    enemyHead.pos={150,200,1};
+    enemyRoot.pos={150,170,1};
+    physicsBlocked=false;
+    hitCollider=nullptr;
+    hitDistance=-1.f;
+    smokeBlocked=false;
+    endpointSmoke=false;
+    partialCoverY=-1.f;
+    projectionScale=1.f;
+    Triggerbot1657::pawnFirePosition=nullptr;
+    Triggerbot1657::pawnEyePosition=nullptr;
+    Triggerbot1657::getClipAmmo=&GetClipAmmo;
+    Triggerbot1657::weaponIsSingleFire=&MockIsSingleFire;
+    Triggerbot1657::weaponIsSingleShot=&MockIsSingleShot;
+    Triggerbot1657::weaponCanAutoFire=&MockCanAutoFire;
+    mockSingleFire=false;mockSingleShot=true;mockCanAutoFire=false;
+    Triggerbot1657::tapHoldMs=0;
+    Triggerbot1657::nextPressMs=0;
+    probeAmmo=30;
+    ready=true;readyIgnoringModeTransition=false;ads=true;
+    Triggerbot1657::uiMode=Triggerbot1657::Mode::AdsOnly;
+    Triggerbot1657::PublishUi(ImVec2{300,400});
+    int transitionWeapon=9090;
+    Pawn::equipped=&transitionWeapon;
+    tick(); // classify from the weapon metadata and press
+    assert(Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Single);
+    tick(); // no round left the weapon: tap release
+    assert(!Triggerbot1657::triggerHeldFire);
+
+    // CanFire reports "not yet" only for the hip-fire <-> ADS fire-mode transition.
+    // The press must still be issued so the shot leaves when the transition ends,
+    // instead of costing a whole transition after the scope settles.
+    Triggerbot1657::nextPressMs=0;
+    ready=false;readyIgnoringModeTransition=true;
+    const auto startsBeforeTransition=startCalls;
+    tick();
+    assert(startCalls==startsBeforeTransition+1);
+    assert(Triggerbot1657::triggerHeldFire);
+    ready=true;readyIgnoringModeTransition=false;
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire);
+
+    // An empty magazine is never pressed: the game would only run its dry-fire path,
+    // and repeating it at the tap rate is work that piles up over a long session.
+    Triggerbot1657::nextPressMs=0;
+    probeAmmo=0;
+    ready=false;readyIgnoringModeTransition=true;
+    const auto startsBeforeEmpty=startCalls;
+    for (int i=0;i<4;++i) tick();
+    assert(startCalls==startsBeforeEmpty);
+    assert(!Triggerbot1657::triggerHeldFire);
+    ready=true;readyIgnoringModeTransition=false;
+    probeAmmo=30;
+
+    // ADS tries the camera first: it is the game's bullet origin and costs one cast,
+    // while the muzzle path spends several inside the player's own view model.
+    Triggerbot1657::nextPressMs=0;
+    fireOriginBlocked=false;eyeOriginBlocked=false;headOriginBlocked=false;cameraOriginBlocked=false;
+    Triggerbot1657::pawnFirePosition=&FirePosition;
+    Triggerbot1657::pawnEyePosition=&EyePosition;
+    assert(Triggerbot1657::EligibleFromLocalView(Pawn::equipped,true,true));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
+    assert(lastFrom.x==0.f && lastFrom.y==0.f && lastFrom.z==0.f);
+    assert(Triggerbot1657::diagPhysicsCasts.load()==1);
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    Triggerbot1657::pawnFirePosition=nullptr;
+    Triggerbot1657::pawnEyePosition=nullptr;
+    Triggerbot1657::weaponIsSingleFire=nullptr;
+    Triggerbot1657::weaponIsSingleShot=nullptr;
+    Triggerbot1657::weaponCanAutoFire=nullptr;
+    Triggerbot1657::getClipAmmo=nullptr;
+    ads=false;
 }

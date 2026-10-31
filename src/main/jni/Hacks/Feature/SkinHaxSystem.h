@@ -96,9 +96,16 @@ static bool Valid(void* p) {
     return p && Tools::IsPtrValid(p);
 }
 
+// Captured config instances are kept for the lifetime of the process. The game
+// creates a fresh set as it loads more content, so an unbounded list grew with every
+// session and every rebuild/scan became slower. Cap it: the database is built from
+// the configs already present, extra ones add nothing.
+static constexpr size_t kMaxCapturedInstances = 2048;
+
 static void Capture(std::vector<void*>& out, void* instance) {
     if (!Valid(instance)) return;
     std::lock_guard<std::mutex> lock(gInstanceMutex);
+    if (out.size() >= kMaxCapturedInstances) return;
     if (std::find(out.begin(), out.end(), instance) == out.end()) out.push_back(instance);
 }
 
@@ -146,7 +153,7 @@ static size_t Fingerprint() {
     v = v * 1315423911u + gSightInstances.size();
     v = v * 1315423911u + gKillInstances.size();
     v = v * 1315423911u + gResourceInstances.size();
-    v = v * 1315423911u + SnapshotWeaponSkinConfigs().size();
+    v = v * 1315423911u + WeaponSkinConfigCount();
     return v;
 }
 
@@ -398,8 +405,13 @@ static bool BuildDatabase() {
         int mythicSight = 0;
         int deadReplay = 0;
         int killEffect = 0;
+        int baseKillEffect = 0;
         auto baseExtra = extraById.find(baseId);
-        if (baseExtra != extraById.end()) extraAlias = baseId;
+        if (baseExtra != extraById.end()) {
+            extraAlias = baseId;
+            auto* bf = reinterpret_cast<WeaponConfExtraFields*>(reinterpret_cast<uintptr_t>(baseExtra->second) + 0x10);
+            if (Valid(bf)) baseKillEffect = bf->DefaultKillEffectId;
+        }
         auto selectedExtra = extraById.find(confId);
         if (selectedExtra != extraById.end()) {
             auto* ef = reinterpret_cast<WeaponConfExtraFields*>(reinterpret_cast<uintptr_t>(selectedExtra->second) + 0x10);
@@ -413,10 +425,22 @@ static bool BuildDatabase() {
             if (a != armorByIcon.end()) mythicArmor = a->second;
             auto si = sightByIcon.find(weaponIconId);
             if (si != sightByIcon.end()) mythicSight = si->second;
-            auto ki = killByIcon.find(weaponIconId);
-            if (ki != killByIcon.end())
-                killEffect = SelectKillEffectId(killEffect, ki->second);
         }
+        // The kill-effect table is keyed by the weapons an effect can be equipped on,
+        // which are weapon ids, not the inventory icon. Resolve the authored id from
+        // the skin, then the base weapon, then the compatibility table by every
+        // plausible key. A mythic skin normally carries its kill effect on the base
+        // weapon, so looking only at the skin entry left it at zero - which also
+        // cleared the config value below and removed the kill sound with it.
+        auto compatibleKill = [&](int key) -> int {
+            if (key <= 0) return 0;
+            auto it = killByIcon.find(key);
+            return it == killByIcon.end() ? 0 : it->second;
+        };
+        int matchingKill = compatibleKill(confId);
+        if (matchingKill <= 0) matchingKill = compatibleKill(baseId);
+        if (matchingKill <= 0) matchingKill = compatibleKill(weaponIconId);
+        killEffect = ResolveKillEffectId(killEffect, baseKillEffect, matchingKill);
 
         int fx = 0, invModel = 0, rawModel = 0;
         uint16_t mini = 0, small = 0, sprite = 0, square = 0;
@@ -507,7 +531,10 @@ static void ApplyToCurrentInstances(const itemInfo& skin) {
             f->DefaultMythicSig = (uint8_t)skin.WeaponExtra[2];
         }
         f->DefaultDeadReplayEffectId = skin.WeaponExtra[3];
-        f->DefaultKillEffectId = skin.WeaponExtra[4];
+        // Never erase a kill effect the weapon already carries. Writing an unresolved
+        // zero used to remove the equipped skin's kill visual and its kill sound while
+        // the (separately configured) firing effect kept working.
+        if (skin.WeaponExtra[4] > 0) f->DefaultKillEffectId = skin.WeaponExtra[4];
     }
 
     for (void* v : s.asset) {

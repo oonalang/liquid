@@ -69,6 +69,12 @@ inline std::int64_t fireTapStartedMs=0;
 // single-fire press is held until this drops, so a shot the game delays (the ADS
 // aim-to-fire interval) is not thrown away by an early release.
 inline std::int32_t pressAmmoBefore=-1;
+// Backoff before the next press after the game ignored one, and the single retry
+// allowed for a held automatic weapon whose press was dropped by a fire-mode
+// transition. Both keep a failed press from re-running the weapon fire path every
+// frame for the rest of the match.
+inline std::int64_t nextPressMs=0;
+inline bool pressReissued=false;
 inline bool previousLocalAlive=false;
 
 
@@ -107,6 +113,8 @@ inline void ResetLifeState() {
     triggerHeldFire=false;
     fireTapStartedMs=0;
     pressAmmoBefore=-1;
+    nextPressMs=0;
+    pressReissued=false;
     fireMode=FireMode::Unknown;
     fireModeWeapon=nullptr;
     probeActive=false;
@@ -324,7 +332,7 @@ inline bool Finite3(Vector3 p) { return std::isfinite(p.x)&&std::isfinite(p.y)&&
 
 struct FramePointerValidation {
     struct Entry { const void* ptr; bool valid; };
-    std::array<Entry,48> entries{};
+    std::array<Entry,96> entries{};
     unsigned size=0, checks=0, reused=0;
     bool IsValid(const void* ptr) {
         if (!ptr) return false;
@@ -657,6 +665,17 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         if (candidate.available) usable[usableCount++]=&candidate;
         else MarkOriginUnavailable(candidate.id);
     }
+    // In ADS the game fires from the camera, and the muzzle ray starts inside the
+    // player's own view model, so the camera test is both authoritative and the
+    // cheapest. Trying the muzzle first spent several casts before reaching it, which
+    // is latency on every shot and physics work on every frame.
+    if (ads) {
+        for (unsigned i=1;i<usableCount;++i) {
+            if (usable[i]->id!=RayOrigin::Camera) continue;
+            std::swap(usable[0],usable[i]);
+            break;
+        }
+    }
 
     for (int i=0;i<enemySnapshot.count;++i) {
         const std::uintptr_t enemy=enemySnapshot.pawns[i];
@@ -775,11 +794,16 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
             diagLastSampleFraction.store(sample.fraction,std::memory_order_relaxed);
             Report(DiagnosticStage::LinecastPending);
             HitKind hitKind=HitKind::Unknown;
-            float hitDistance=-1.f;
-            unsigned selfSkips=0;
-            RayOrigin usedOrigin=RayOrigin::None;
+            float hitDistance=-1.f;                unsigned selfSkips=0;
+                RayOrigin usedOrigin=RayOrigin::None;
+            // Share the remaining budget between the samples still to test, so the
+            // hidden side of a partially covered enemy cannot spend every cast and
+            // leave its visible side untested for as long as the pose is the same.
+            const unsigned allowance=SampleCastAllowance(castsRemaining,eligibleParts.count-sampleIndex);
+            const unsigned castsAtSampleStart=castsRemaining;
             for (unsigned originIndex=0;originIndex<usableCount;++originIndex) {
                 if (!castsRemaining) break;
+                if (castsAtSampleStart-castsRemaining>=allowance) break;
                 HitKind kind=HitKind::Unknown;
                 float hit=-1.f;
                 unsigned skips=0;
@@ -899,6 +923,8 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         fireMode=FireMode::Unknown;
         probeActive=false;
         probeRetryAfterMs=0;
+        nextPressMs=0;
+        pressReissued=false;
         probeFailures=!getClipAmmo ? kMaxProbeAttempts : 0;
         diagProbeSpent.store(probeFailures>=kMaxProbeAttempts,std::memory_order_relaxed);
         if (triggerHeldFire && stopFire) {
@@ -912,8 +938,14 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     const bool ads=validApis && healthy ? isAiming(local,nullptr) : false;
 
 
+    // CanFire(bool ignoreChangingFireModeTransition): scoping in and switching fire
+    // mode put the weapon into a short transition during which the default query
+    // answers "not yet". Ignoring that single gate lets the press go out on the frame
+    // the scope settles instead of one whole transition later; reload, empty
+    // magazine, equip time and the shot cooldown still block it, and the game still
+    // refuses a round it cannot deliver.
     const bool weaponReady=validApis && currentWeapon && healthy &&
-        (triggerHeldFire || canFire(local,false,nullptr));
+        (triggerHeldFire || canFire(local,true,nullptr));
     if (!enabledNow) Report(DiagnosticStage::Disabled);
     else if (!healthy) Report(DiagnosticStage::LocalPlayerUnavailable);
     else if (!validApis || !weaponReady) Report(DiagnosticStage::WeaponNotReady);
@@ -939,9 +971,19 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             }
         }
         const bool ammoAtPress=ReadClipAmmo(const_cast<void*>(currentWeapon),ammoForProbe);
+        // An empty magazine cannot produce a round. Pressing it only runs the game's
+        // dry-fire path (sound, animation, effects); repeating that at the tap rate for
+        // as long as the dot rests on a target is game work that piles up over a long
+        // session. Wait out the backoff instead of turning the trigger into a metronome.
+        const bool emptyClip=ammoAtPress && ammoForProbe==0 && !canFire(local,false,nullptr);
+        if (now<nextPressMs || emptyClip) {
+            if (emptyClip) nextPressMs=now+kIgnoredPressBackoffMs;
+            Report(DiagnosticStage::WeaponNotReady);
+        } else {
         const bool canProbe=probeWanted() && ammoAtPress;
 
         pressAmmoBefore=ammoAtPress ? ammoForProbe : -1;
+        pressReissued=false;
         startFire(self,nullptr);
         triggerHeldFire=true;
         fireTapStartedMs=now;
@@ -962,6 +1004,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             diagProbeSpent.store(true,std::memory_order_relaxed);
         }
         Report(DiagnosticStage::FireRequested);
+        }
     } else if (!shouldFire && triggerHeldFire) {
         // isImmidiately=true: a gradual release runs the weapon-lower transition, which
         // the game has to finish before the next StartFire is accepted. That transition
@@ -1027,6 +1070,23 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             Report(DiagnosticStage::FireModeProbe);
         } else if (fireMode==FireMode::Auto ||
                    (fireMode==FireMode::Unknown && probeFailures<kMaxProbeAttempts)) {
+            // A press issued just before the game entered its fire-mode transition can
+            // be dropped. The trigger is already held, so nothing else will ask the
+            // weapon to fire again; retry the request once when the weapon says it is
+            // ready and the magazine has not moved.
+            if (fireMode==FireMode::Auto && !pressReissued &&
+                now-fireTapStartedMs>=kIgnoredPressBackoffMs) {
+                std::int32_t ammoNow=0;
+                const bool haveAmmo=ReadClipAmmo(const_cast<void*>(currentWeapon),ammoNow);
+                const bool delivered=pressAmmoBefore>=0 && haveAmmo && ammoNow<pressAmmoBefore;
+                if (!delivered && canFire(local,true,nullptr)) {
+                    startFire(self,nullptr);
+                    fireTapStartedMs=now;
+                    if (haveAmmo) pressAmmoBefore=ammoNow;
+                    pressReissued=true;
+                    diagFireRequests.fetch_add(1,std::memory_order_relaxed);
+                }
+            }
             // Automatic - and still being classified: keep the trigger held. Chopping
             // every hold into a tapHoldMs burst released and re-pressed the game's fire
             // state machine dozens of times per second, which delayed the next shot (the
@@ -1049,11 +1109,18 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             const bool delivered=pressAmmoBefore>=0 &&
                 ReadClipAmmo(const_cast<void*>(currentWeapon),ammoNow) &&
                 ammoNow<pressAmmoBefore;
-            if (delivered || held>=kMaxTapHoldMs ||
-                (held>=tapHoldMs && (pressAmmoBefore<0 || canFire(local,false,nullptr)))) {
+            const bool readyAgain=!delivered && held>=tapHoldMs &&
+                (pressAmmoBefore<0 || canFire(local,true,nullptr));
+            if (delivered || readyAgain || held>=kMaxTapHoldMs) {
                 stopFire(self,true,nullptr);
                 triggerHeldFire=false;
                 pressAmmoBefore=-1;
+                pressReissued=false;
+                // Only a press the magazine proves was ignored (it arrived during a
+                // fire-mode transition) earns a backoff; the retry runs the weapon fire
+                // path even though no round can come out yet. With an unreadable clip
+                // there is no evidence either way, so the tap cadence is kept.
+                if (!delivered && pressAmmoBefore>=0) nextPressMs=now+kIgnoredPressBackoffMs;
                 diagFireTaps.fetch_add(1,std::memory_order_relaxed);
                 Report(DiagnosticStage::FireTapped);
             } else {

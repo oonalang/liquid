@@ -81,6 +81,21 @@ constexpr std::int64_t kMaximumUiAgeMs = 350;
 // down if the weapon never answers, while still giving a delayed shot its chance.
 constexpr std::int64_t kMaxTapHoldMs = 400;
 
+// A press the game ignored (it arrived during a fire-mode transition) or one that
+// could not produce a round must not be retried every frame: every request runs the
+// weapon's fire path, and a long session of failed presses is game work that piles
+// up. Wait this long before the next attempt.
+constexpr std::int64_t kIgnoredPressBackoffMs = 120;
+
+// Share the linecast budget between the sample points of one candidate. Handing the
+// first samples every cast let a partially covered enemy spend the whole budget on
+// its hidden side and never test the visible side, so the bot refused to fire at it
+// for as long as the geometry stayed the same.
+inline unsigned SampleCastAllowance(unsigned remaining, unsigned samplesLeft) {
+    if (samplesLeft == 0) return 0;
+    return std::max(1u, remaining / samplesLeft);
+}
+
 
 
 inline bool WithinRange(float worldDistance) {
@@ -112,6 +127,7 @@ inline SegmentHit ClosestOnBodySegment(Point crosshair, Point head, Point root) 
 
 
     result.halfWidth=std::clamp(std::sqrt(len2)*0.13f,0.75f,90.f);
+
     result.valid=std::isfinite(result.point.x) && std::isfinite(result.point.y);
     return result;
 }
