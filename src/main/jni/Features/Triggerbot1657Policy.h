@@ -31,13 +31,29 @@ inline FireMode ClassifyFireMode(int before, int mid, int after) {
 
 
 
-constexpr unsigned kMaxSelfHitSkips = 2;
-constexpr float kMaxSelfHitAdvance = 2.5f;
+// The first-person body, arms and weapon model are several overlapping colliders
+// inside the muzzle ray. Two skips / 2.5 units (the old budget) ran out inside the
+// player's own model, so every sample was reported as blocked while the enemy was
+// plainly visible. Allow the whole view model to be passed through instead.
+constexpr unsigned kMaxSelfHitSkips = 6;
+constexpr float kMaxSelfHitAdvance = 5.5f;
 constexpr float kSelfHitStep = 0.05f;
 inline bool SkipSelfHit(unsigned skipped, float advanced, float hitDistance) {
     if (!std::isfinite(advanced) || !std::isfinite(hitDistance) || hitDistance < 0.f) return false;
     if (skipped >= kMaxSelfHitSkips) return false;
     return advanced + hitDistance + kSelfHitStep <= kMaxSelfHitAdvance;
+}
+
+// A cast that starts on (or inside) a surface reports a hit at ~zero distance.
+// Standing against low cover - the muzzle or the camera ends up embedded in the
+// obstacle - used to make every origin report "blocked" immediately. Step out of
+// that embedded start instead of failing the whole line of sight.
+constexpr float kEmbeddedHitDistance = 0.2f;
+constexpr float kEmbeddedHitStep = 0.25f;
+constexpr unsigned kMaxEmbeddedSkips = 2;
+inline bool EmbeddedHit(float hitDistance) {
+    return std::isfinite(hitDistance) && hitDistance >= 0.f &&
+        hitDistance <= kEmbeddedHitDistance;
 }
 
 

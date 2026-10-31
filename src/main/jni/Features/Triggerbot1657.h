@@ -359,8 +359,25 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
     hitDistance=-1.f;
     selfSkips=0;
     if (blockedCollider) *blockedCollider=0;
-    Vector3 cursor=from;
+    const float dx=target.x-from.x, dy=target.y-from.y, dz=target.z-from.z;
+    const float length=std::sqrt(dx*dx+dy*dy+dz*dz);
+    if (!std::isfinite(length) || length<=0.001f) {
+        kind=HitKind::None;
+        return true;
+    }
+    const Vector3 direction{dx/length,dy/length,dz/length};
     float advanced=0.f;
+    unsigned embeddedSkips=0;
+    auto advance=[&](float step) {
+        if (!std::isfinite(step) || step<=0.f || advanced+step>=length) return false;
+        advanced+=step;
+        return true;
+    };
+    auto pointAt=[&](float distance) {
+        return Vector3{from.x+direction.x*distance,
+                       from.y+direction.y*distance,
+                       from.z+direction.z*distance};
+    };
     for (;;) {
         RaycastHit hit{};
 
@@ -372,6 +389,7 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
         --remainingCasts;
         const auto cast=physicsLinecastFiltered ? physicsLinecastFiltered : physicsLinecast;
         diagPhysicsCasts.fetch_add(1,std::memory_order_relaxed);
+        const Vector3 cursor=pointAt(advanced);
         if (!cast(cursor,target,&hit,nullptr)) {
 
 
@@ -381,7 +399,7 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
             hitDistance=-1.f;
             return true;
         }
-        hitDistance=advanced+hit.distance;
+        hitDistance=advanced+std::max(hit.distance,0.f);
         Transform* hitTransform=nullptr;
         if (validity.IsValid(hit.collider) && componentTransform)
             hitTransform=componentTransform(hit.collider,nullptr);
@@ -392,23 +410,29 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
                 return true;
             }
             if (IsLocalPart(hitTransform,own)) {
-                if (!SkipSelfHit(selfSkips,advanced,hit.distance)) {
+                if (!SkipSelfHit(selfSkips,advanced,std::max(hit.distance,0.f))) {
                     if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
                     kind=HitKind::Other;
                     return false;
                 }
-                const float dx=target.x-cursor.x, dy=target.y-cursor.y, dz=target.z-cursor.z;
-                const float len=std::sqrt(dx*dx+dy*dy+dz*dz);
-                const float step=hit.distance+kSelfHitStep;
-                if (!(len>0.001f) || step>=len) {
+                if (!advance(std::max(hit.distance,0.f)+kSelfHitStep)) {
                     if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
                     kind=HitKind::Other; return false;
                 }
-                cursor={cursor.x+dx/len*step,cursor.y+dy/len*step,cursor.z+dz/len*step};
-                advanced+=step;
                 ++selfSkips;
                 continue;
             }
+        }
+        // The ray began on or inside the obstacle (the player is standing flush
+        // against low cover): step out of it instead of reporting an immediate block.
+        if (EmbeddedHit(hit.distance) && advanced<=0.f && embeddedSkips<kMaxEmbeddedSkips) {
+            ++embeddedSkips;
+            if (!advance(kEmbeddedHitStep)) {
+                if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
+                kind=transformValid ? HitKind::Other : HitKind::Unknown;
+                return false;
+            }
+            continue;
         }
         if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
         kind=transformValid ? HitKind::Other : HitKind::Unknown;
@@ -591,6 +615,17 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         return false;
     }
 
+    // Preferred order: firing position, eye, head, then camera. A blocked muzzle no
+    // longer vetoes the shot - in 1.6.57 the bullet ray is spawned from the camera, so
+    // a clear camera path is what the game itself will hit. Solid cover still blocks
+    // every origin, and the first clear origin wins so the common case costs one cast.
+    const OriginCandidate* usable[4]{};
+    unsigned usableCount=0;
+    for (const auto& candidate : origins) {
+        if (candidate.available) usable[usableCount++]=&candidate;
+        else MarkOriginUnavailable(candidate.id);
+    }
+
     for (int i=0;i<enemySnapshot.count;++i) {
         const std::uintptr_t enemy=enemySnapshot.pawns[i];
         if (!enemy || enemy==reinterpret_cast<std::uintptr_t>(pawn) ||
@@ -675,15 +710,7 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         diagDotMatches.fetch_add(1,std::memory_order_relaxed);
 
         bool wallRejected=false,smokeRejected=false;
-        const OriginCandidate* firingOrigin=nullptr;
-        for (unsigned originIndex=0;originIndex<3;++originIndex) {
-            if (origins[originIndex].available) {
-                firingOrigin=&origins[originIndex];
-                break;
-            }
-            MarkOriginUnavailable(origins[originIndex].id);
-        }
-        if (!firingOrigin) {
+        if (!usableCount) {
             diagWallRejections.fetch_add(1,std::memory_order_relaxed);
             continue;
         }
@@ -719,23 +746,22 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
             float hitDistance=-1.f;
             unsigned selfSkips=0;
             RayOrigin usedOrigin=RayOrigin::None;
-            auto checkOrigin=[&](const OriginCandidate& origin) {
+            for (unsigned originIndex=0;originIndex<usableCount;++originIndex) {
+                if (!castsRemaining) break;
                 HitKind kind=HitKind::Unknown;
                 float hit=-1.f;
                 unsigned skips=0;
                 std::uintptr_t blocker=0;
-                const bool clear=LineToTarget(origin.position,sampleTarget,own,
+                const bool clear=LineToTarget(usable[originIndex]->position,sampleTarget,own,
                     reinterpret_cast<void*>(enemy),validity,kind,hit,skips,
                     castsRemaining,&blocker);
-                RecordOrigin(origin.id,clear,hit,blocker);
+                RecordOrigin(usable[originIndex]->id,clear,hit,blocker);
                 hitKind=kind;
                 hitDistance=hit;
                 selfSkips=std::max(selfSkips,skips);
-                return clear;
-            };
-            const bool lineClear=castsRemaining && checkOrigin(*firingOrigin) &&
-                castsRemaining && checkOrigin(origins[3]);
-            if (lineClear) usedOrigin=firingOrigin->id;
+                if (clear) { usedOrigin=usable[originIndex]->id; break; }
+            }
+            const bool lineClear=usedOrigin!=RayOrigin::None;
             diagHitKind.store(static_cast<unsigned>(hitKind),std::memory_order_relaxed);
             diagHitDistance.store(hitDistance,std::memory_order_relaxed);
             diagHitOrigin.store(static_cast<unsigned>(usedOrigin),std::memory_order_relaxed);
@@ -814,7 +840,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     if (!healthy) {
         if (previousLocalAlive || triggerHeldFire || probeActive || fireModeWeapon) {
             if (triggerHeldFire && stopFire) {
-                stopFire(self,false,nullptr);
+                stopFire(self,true,nullptr);
             }
             ResetLifeState();
         }
@@ -840,7 +866,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         probeFailures=0;
         diagProbeSpent.store(false,std::memory_order_relaxed);
         if (triggerHeldFire && stopFire) {
-            stopFire(self,false,nullptr);
+            stopFire(self,true,nullptr);
             triggerHeldFire=false;
             Report(DiagnosticStage::FireReleased);
         }
@@ -859,6 +885,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         EligibleFromLocalView(const_cast<void*>(currentWeapon),ads,weaponReady);
 
     const auto now=NowMs();
+    std::int32_t ammoForProbe=0;
     if (shouldFire && !triggerHeldFire) {
 
 
@@ -883,7 +910,10 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         }
         Report(DiagnosticStage::FireRequested);
     } else if (!shouldFire && triggerHeldFire) {
-        stopFire(self,false,nullptr);
+        // isImmidiately=true: a gradual release runs the weapon-lower transition, which
+        // the game has to finish before the next StartFire is accepted. That transition
+        // is what made the next shot feel delayed, so release instantly instead.
+        stopFire(self,true,nullptr);
         triggerHeldFire=false;
         if (probeActive) {
 
@@ -904,8 +934,8 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
                 const FireMode verdict=read ?
                     ClassifyFireMode(probeBefore,probeMid,ammo) : FireMode::Unknown;
                 probeActive=false;
-                if (verdict!=FireMode::Auto) {
-                    stopFire(self,false,nullptr);
+                if (verdict==FireMode::Single) {
+                    stopFire(self,true,nullptr);
                     triggerHeldFire=false;
                     diagFireTaps.fetch_add(1,std::memory_order_relaxed);
                 }
@@ -922,15 +952,33 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             } else {
                 Report(DiagnosticStage::FireModeProbe);
             }
-        } else if (fireMode==FireMode::Auto) {
-
-
+        } else if (fireMode==FireMode::Unknown &&
+                   probeFailures<kMaxProbeAttempts && now>=probeRetryAfterMs &&
+                   ReadClipAmmo(const_cast<void*>(currentWeapon),ammoForProbe)) {
+            // While the trigger stays held there is no new StartFire to hang a probe on,
+            // so a retry starts on the held trigger instead of releasing the weapon.
+            probeActive=true;
+            probeStartedMs=now;
+            probeBefore=ammoForProbe;
+            probeMid=ammoForProbe;
+            probeMidTaken=false;
+            diagProbes.fetch_add(1,std::memory_order_relaxed);
+            Report(DiagnosticStage::FireModeProbe);
+        } else if (fireMode==FireMode::Auto ||
+                   (fireMode==FireMode::Unknown && probeFailures<kMaxProbeAttempts)) {
+            // Automatic - and still being classified: keep the trigger held. Chopping
+            // every hold into a tapHoldMs burst released and re-pressed the game's fire
+            // state machine dozens of times per second, which delayed the next shot (the
+            // trigger has to re-arm) and multiplied the game's per-press work (fire
+            // requests, effects, audio) over a long session. Verified single-fire weapons
+            // still tap below; a weapon that never classifies falls back to tapping so it
+            // keeps shooting at all.
             Report(DiagnosticStage::FireHeld);
         } else if (now-fireTapStartedMs >= tapHoldMs) {
 
 
 
-            stopFire(self,false,nullptr);
+            stopFire(self,true,nullptr);
             triggerHeldFire=false;
             diagFireTaps.fetch_add(1,std::memory_order_relaxed);
             Report(DiagnosticStage::FireTapped);

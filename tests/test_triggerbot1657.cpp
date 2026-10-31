@@ -60,10 +60,19 @@ int main() {
 
     assert(SkipSelfHit(0,0.f,0.66f));
     assert(SkipSelfHit(1,0.71f,0.66f));
-    assert(!SkipSelfHit(2,1.42f,0.66f));
+    // The whole first-person model (body, arms, weapon) must be passable.
+    assert(SkipSelfHit(5,4.26f,0.66f));
+    assert(!SkipSelfHit(6,4.97f,0.66f));
     assert(!SkipSelfHit(0,0.f,-1.f));
     assert(!SkipSelfHit(0,NAN,0.5f));
-    assert(!SkipSelfHit(0,2.4f,0.66f));
+    assert(!SkipSelfHit(0,4.9f,0.66f));
+
+    // A cast that starts on/inside low cover reports a ~zero-distance hit.
+    assert(EmbeddedHit(0.f));
+    assert(EmbeddedHit(kEmbeddedHitDistance));
+    assert(!EmbeddedHit(kEmbeddedHitDistance+0.01f));
+    assert(!EmbeddedHit(-1.f));
+    assert(!EmbeddedHit(std::numeric_limits<float>::quiet_NaN()));
 
 
     assert(OriginOffsetSane(0.f));
