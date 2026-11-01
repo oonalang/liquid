@@ -11,7 +11,8 @@ struct Component { Transform* transform; Transform* get_transform(){++legacyTran
 struct Collider { Transform* transform; };
 struct Camera:Component { static Camera* main; static Camera* get_main(){return main;} };
 Camera* Camera::main=nullptr;
-struct Pawn { static void* equipped; void* get_CurrentWeapon(){return equipped;} };
+struct Pawn { static void* equipped; static int weaponReads; void* get_CurrentWeapon(){++weaponReads;return equipped;} };
+int Pawn::weaponReads=0;
 void* Pawn::equipped=nullptr;
 struct GamePlay { static Pawn* local; static Pawn* get_LocalPawn(){return local;} };
 Pawn* GamePlay::local=nullptr;
@@ -52,8 +53,10 @@ static int startCalls=0,stopCalls=0,updateCalls=0;
 static void StartFire(void*,const void*) { ++startCalls; }
 static void StopFire(void*,bool,const void*) { ++stopCalls; }
 static void UpdatePawn(void*,float,const void*) { ++updateCalls; }
-static bool Aim(void*,const void*) { return ads; }
+static int aimCalls=0, canFireCalls=0;
+static bool Aim(void*,const void*) { ++aimCalls; return ads; }
 static bool CanFire(void*,bool ignoreTransition,const void*) {
+    ++canFireCalls;
     return ready || (ignoreTransition && readyIgnoringModeTransition);
 }
 static Vector3 lastFrom{};
@@ -166,7 +169,8 @@ static bool IsChildOf(Transform* child,Transform* parent,const void*) {
     return false;
 }
 static bool SmokeBetween(void*,Vector3,Vector3,const void*){return smokeBlocked;}
-static bool InSmoke(void*,Vector3,const void*){return endpointSmoke;}
+static int inSmokeCalls=0;
+static bool InSmoke(void*,Vector3,const void*){++inSmokeCalls;return endpointSmoke;}
 static Triggerbot1657::RaycastHit* expectedHit=nullptr;
 static bool NormalLinecast(Vector3,Vector3,Triggerbot1657::RaycastHit* hit,const void* method) {
     assert(hit==expectedHit && method==nullptr);
@@ -542,6 +546,10 @@ int main() {
     assert(eligible());
 
 
+    // The attachment gap above is a transition even with the same pawn address.
+    assert(!Triggerbot1657::matchSettled && !Triggerbot1657::pawnSettled);
+    Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kMatchSettleMs;
+    Triggerbot1657::pawnChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kPawnSettleMs;
     const auto requestsBeforeStart=Triggerbot1657::diagFireRequests.load();
     tick();
     assert(Triggerbot1657::triggerHeldFire);
@@ -958,9 +966,11 @@ int main() {
     assert(Triggerbot1657::lastController==controller.data());
     assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::probeActive);
 
+    const int updatesBeforeInvalid=updateCalls;
     Tools::invalidPointer=reinterpret_cast<void*>(0x1);
     Triggerbot1657::HookUpdateLocalPawn(const_cast<void*>(Tools::invalidPointer),.016f,nullptr);
     assert(Triggerbot1657::lastController==controller.data());
+    assert(updateCalls==updatesBeforeInvalid);
     Tools::invalidPointer=nullptr;
 
     Triggerbot1657::fireMode=Triggerbot1657::FireMode::Auto;
@@ -1030,7 +1040,13 @@ int main() {
     GamePlay::local=reinterpret_cast<Pawn*>(player.data());
     tick();
     assert(Triggerbot1657::lastController==controller.data());
+    assert(startCalls==startsBeforeDeath+2); // reused pointer still waits after a gap
+    assert(Triggerbot1657::pendingRelease);
+    Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kMatchSettleMs;
+    Triggerbot1657::pawnChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kPawnSettleMs;
+    tick();
     assert(startCalls==startsBeforeDeath+3);
+    assert(!Triggerbot1657::pendingRelease);
 
     {
         projectionScale=20.f;
@@ -1167,6 +1183,13 @@ int main() {
     assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     Triggerbot1657::pawnFirePosition=nullptr;
     Triggerbot1657::pawnEyePosition=nullptr;
+    endpointSmoke=true;
+    const int smokeCallsBefore=inSmokeCalls;
+    assert(!Triggerbot1657::EligibleFromLocalView(Pawn::equipped,true,true));
+    assert(inSmokeCalls==smokeCallsBefore+1);
+    assert(Triggerbot1657::diagPhysicsCasts.load()==0);
+    assert(Triggerbot1657::diagEnemies.load()==0);
+    endpointSmoke=false;
     // --- r29: a new MatchGame must not inherit the previous match's fire state ---
     // The match object is replaced for every new match and the old pawn, controller
     // and weapon are torn down around that swap. A press still held there runs the
@@ -1189,14 +1212,36 @@ int main() {
     const auto startsBeforeNewMatch=startCalls;
     const auto stopsBeforeNewMatch=stopCalls;
     Triggerbot1657::lastMatchGame=reinterpret_cast<void*>(1); // stale: a new match replaced it
+    const int readsBeforeSwap=Pawn::weaponReads;
+    const int aimsBeforeSwap=aimCalls, canFireBeforeSwap=canFireCalls;
     tick();
-    assert(stopCalls==stopsBeforeNewMatch+1);   // the held press is released on the swap
+    assert(Pawn::weaponReads==readsBeforeSwap);
+    assert(aimCalls==aimsBeforeSwap && canFireCalls==canFireBeforeSwap);
+    assert(stopCalls==stopsBeforeNewMatch); // no release during scene loading
     assert(startCalls==startsBeforeNewMatch);   // and nothing is pressed until it settles
     assert(!Triggerbot1657::matchSettled);
     Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kMatchSettleMs;
     tick();
     assert(Triggerbot1657::matchSettled);
+    assert(stopCalls==stopsBeforeNewMatch+1);
     assert(startCalls==startsBeforeNewMatch+1); // fires again once the new match is up
+
+    // A -> no match -> B must not be mistaken for first injection into a match.
+    const auto gameBeforeGap=gameAddress;
+    gameAddress=0;
+    const int readsBeforeGap=Pawn::weaponReads, stopsBeforeGap=stopCalls;
+    tick();
+    Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-5000;
+    tick();
+    assert(!Triggerbot1657::matchSettled);
+    assert(Pawn::weaponReads==readsBeforeGap && stopCalls==stopsBeforeGap);
+    gameAddress=gameBeforeGap;
+    tick();
+    assert(!Triggerbot1657::matchSettled);
+    assert(Pawn::weaponReads==readsBeforeGap && stopCalls==stopsBeforeGap);
+    Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kMatchSettleMs;
+    tick();
+    assert(Triggerbot1657::matchSettled && stopCalls==stopsBeforeGap+1);
 
     // --- r30: a round change must not run the fire path on the pawn being replaced ---
     // A round transition replaces the local pawn and destroys the weapon the trigger
@@ -1245,6 +1290,41 @@ int main() {
     Triggerbot1657::pendingRelease=false;
     Triggerbot1657::triggerHeldFire=false;
     Triggerbot1657::ResetLifeState();
+
+    // A readable clip that did not change must back off after an ignored tap.
+    Triggerbot1657::getClipAmmo=&GetClipAmmo;
+    Triggerbot1657::weaponIsSingleFire=&MockIsSingleFire;
+    Triggerbot1657::weaponIsSingleShot=&MockIsSingleShot;
+    Triggerbot1657::weaponCanAutoFire=&MockCanAutoFire;
+    mockSingleShot=true;mockCanAutoFire=false;
+    probeAmmo=30;ready=true;ads=false;
+    Triggerbot1657::tapHoldMs=0;
+    tick();
+    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::pressAmmoBefore==30);
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::nextPressMs>Triggerbot1657::NowMs());
+    const int startsBeforeBackoff=startCalls;
+    tick();
+    assert(startCalls==startsBeforeBackoff);
+    Triggerbot1657::nextPressMs=0; // simulate expiration
+    tick();
+    assert(startCalls==startsBeforeBackoff+1);
+
+    // No aim, CanFire, StopFire or press may touch an unreadable weapon.
+    const int aimsBeforeBadWeapon=aimCalls, readyBeforeBadWeapon=canFireCalls;
+    const int stopsBeforeBadWeapon=stopCalls, startsBeforeBadWeapon=startCalls;
+    Tools::invalidPointer=Pawn::equipped;
+    tick();
+    assert(aimCalls==aimsBeforeBadWeapon && canFireCalls==readyBeforeBadWeapon);
+    assert(stopCalls==stopsBeforeBadWeapon && startCalls==startsBeforeBadWeapon);
+    assert(Triggerbot1657::pendingRelease);
+    Tools::invalidPointer=nullptr;
+    tick();
+    assert(stopCalls==stopsBeforeBadWeapon+1);
+    const int updatesBeforeNull=updateCalls;
+    Triggerbot1657::HookUpdateLocalPawn(nullptr,.016f,nullptr);
+    assert(updateCalls==updatesBeforeNull);
 
     Triggerbot1657::weaponIsSingleFire=nullptr;
     Triggerbot1657::weaponIsSingleShot=nullptr;

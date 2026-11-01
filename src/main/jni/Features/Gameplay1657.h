@@ -58,20 +58,29 @@ inline bool IsLocalAimingSniperComponent(const void* self) {
 }
 
 inline float HookSlideSpeedDownPct(void* self) {
-    if (noSlideFatigue.load(std::memory_order_relaxed) && IsLocalSlideComponent(self))
-        return 0.0f;
+    // Metadata does not establish whether this is a penalty or a multiplier.
+    // Preserve the game's speed curve instead of forcing an unverified zero.
     return origSlideSpeedDownPct ? origSlideSpeedDownPct(self) : 0.0f;
 }
 
-// LimitSlideTackle() is where the slide component spends its slide budget: each
-// use shortens the next slide (m_SlideTackleLimitDecreaseRate against
-// m_CurrentMaxIdleTime) until the cooldown refuses the input. Suppressing the
-// budget update for the local player keeps every slide at full length instead of
-// only removing the speed penalty, which is what the old hook did.
+// Keep the routine's initialization and recovery work. Only suppress its two
+// metadata-defined decrease rates for the local call; restore configuration so
+// disabling the option does not leave persistent movement changes.
 inline void (*origLimitSlideTackle)(void*) = nullptr;
 inline void HookLimitSlideTackle(void* self) {
-    if (noSlideFatigue.load(std::memory_order_relaxed) && IsLocalSlideComponent(self)) return;
-    if (origLimitSlideTackle) origLimitSlideTackle(self);
+    if (!origLimitSlideTackle) return;
+    if (!noSlideFatigue.load(std::memory_order_relaxed) || !IsLocalSlideComponent(self)) {
+        origLimitSlideTackle(self);
+        return;
+    }
+    auto* bytes = reinterpret_cast<std::uint8_t*>(self);
+    auto& speedDecrease = *reinterpret_cast<float*>(bytes + 0x48);
+    auto& idleDecrease = *reinterpret_cast<float*>(bytes + 0x4C);
+    const float savedSpeed = speedDecrease, savedIdle = idleDecrease;
+    speedDecrease = idleDecrease = 0.0f;
+    origLimitSlideTackle(self);
+    speedDecrease = savedSpeed;
+    idleDecrease = savedIdle;
 }
 
 inline bool HookCanCrouch(void* self) {

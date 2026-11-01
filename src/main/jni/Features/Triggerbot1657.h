@@ -67,6 +67,7 @@ inline void* lastController=nullptr;
 // and weapon are torn down around that swap, so firing across it reaches objects the
 // game is already destroying.
 inline void* lastMatchGame=nullptr;
+inline bool hasObservedMatch=false;
 inline std::int64_t matchChangedMs=0;
 inline bool matchSettled=true;
 inline constexpr std::int64_t kMatchSettleMs=1500;
@@ -659,6 +660,13 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
     if (!game || !validity.IsValid(reinterpret_cast<void*>(game))) {
         Report(DiagnosticStage::MatchUnavailable); return false;
     }
+    // Every target is rejected while the camera is inside smoke. Query once,
+    // before building poses and casting up to 24 rays through a busy objective.
+    if (inSmoke(reinterpret_cast<void*>(game),cameraPos,nullptr)) {
+        diagSmokeRejections.fetch_add(1,std::memory_order_relaxed);
+        Report(DiagnosticStage::SmokeBlocked);
+        return false;
+    }
     const auto enemyList=*reinterpret_cast<List<std::uintptr_t>**>(game+Class_BaseGame__EnemyPawns);
     if (!enemyList || !validity.IsValid(enemyList)) {
         Report(DiagnosticStage::EnemyListUnavailable); return false;
@@ -846,8 +854,7 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
                 continue;
             }
             Report(DiagnosticStage::SmokePending);
-            const bool concealed=inSmoke(reinterpret_cast<void*>(game),cameraPos,nullptr) ||
-                inSmoke(reinterpret_cast<void*>(game),sampleTarget,nullptr) ||
+            const bool concealed=inSmoke(reinterpret_cast<void*>(game),sampleTarget,nullptr) ||
                 smokeBetween(reinterpret_cast<void*>(game),cameraPos,sampleTarget,nullptr);
             if (concealed) {
                 smokeRejected=true;
@@ -875,35 +882,40 @@ inline void* CurrentMatchGame() {
     return reinterpret_cast<void*>(gameFn());
 }
 
+inline void SuspendTrackedController(void* self) {
+    if (!self || self!=lastController) return;
+    // Losing the local pawn is a lifecycle boundary even if the allocator later
+    // reuses the exact same pawn/match addresses. Don't resume on that first tick.
+    if (triggerHeldFire) pendingRelease=true;
+    ResetLifeState();
+    previousLocalAlive=false;
+    lastController=nullptr;
+    pawnSettled=matchSettled=false;
+    pawnChangedMs=matchChangedMs=NowMs();
+}
+
 inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
-    if (originalUpdateLocalPawn) originalUpdateLocalPawn(self,dt,methodInfo);
     if (!self || !originalUpdateLocalPawn || !Tools::IsPtrValid(self)) {
-        if (self==lastController) {
-            ResetLifeState();
-            previousLocalAlive=false;
-            lastController=nullptr;
-        }
+        SuspendTrackedController(self);
+        Report(DiagnosticStage::LocalControllerMismatch);
+        return;
+    }
+    originalUpdateLocalPawn(self,dt,methodInfo);
+    if (!self || !originalUpdateLocalPawn || !Tools::IsPtrValid(self)) {
+        SuspendTrackedController(self);
         Report(DiagnosticStage::LocalControllerMismatch);
         return;
     }
 
     Pawn* local=m_unity ? GamePlay::get_LocalPawn() : nullptr;
     if (!local || !Tools::IsPtrValid(local)) {
-        if (self==lastController) {
-            ResetLifeState();
-            previousLocalAlive=false;
-            lastController=nullptr;
-        }
+        SuspendTrackedController(self);
         Report(DiagnosticStage::LocalControllerMismatch);
         return;
     }
     const auto attachedPawn=*reinterpret_cast<void**>(reinterpret_cast<std::uint8_t*>(self)+0x78);
     if (attachedPawn!=local) {
-        if (self==lastController) {
-            ResetLifeState();
-            previousLocalAlive=false;
-            lastController=nullptr;
-        }
+        SuspendTrackedController(self);
         Report(DiagnosticStage::LocalControllerMismatch);
         return;
     }
@@ -917,11 +929,12 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         ResetLifeState();
         previousLocalAlive=false;
         lastController=self;
-        matchSettled=lastMatchGame==nullptr;
+        matchSettled=match && !hasObservedMatch;
+        if (match) hasObservedMatch=true;
         lastMatchGame=match;
         matchChangedMs=NowMs();
     }
-    if (!matchSettled && NowMs()-matchChangedMs>=kMatchSettleMs) matchSettled=true;
+    if (match && !matchSettled && NowMs()-matchChangedMs>=kMatchSettleMs) matchSettled=true;
 
     if (local!=lastLocalPawn) {
         // Round change or respawn: drop the press without touching the game, and do
@@ -941,6 +954,13 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         ResetLifeState();
         lastController=self;
         previousLocalAlive=false;
+    }
+
+    // Guard every weapon/aim/release call, not just the final firing decision.
+    // A readable pointer can still refer to a scene object being torn down.
+    if (!match || !matchSettled || !pawnSettled) {
+        Report(DiagnosticStage::MatchUnavailable);
+        return;
     }
 
     const bool healthy=*reinterpret_cast<const bool*>(
@@ -1003,7 +1023,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         diagFireMode.store(static_cast<unsigned>(FireMode::Unknown),std::memory_order_relaxed);
     }
     const bool validApis=startFire && stopFire && isAiming && canFire;
-    const bool ads=validApis && healthy ? isAiming(local,nullptr) : false;
+    const bool ads=validApis && weaponHandleOk && healthy ? isAiming(local,nullptr) : false;
 
 
     // CanFire(bool ignoreChangingFireModeTransition): scoping in and switching fire
@@ -1185,6 +1205,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
             const bool readyAgain=!delivered && held>=tapHoldMs &&
                 (pressAmmoBefore<0 || canFire(local,true,nullptr));
             if (delivered || readyAgain || held>=kMaxTapHoldMs) {
+                const bool ignoredPress=!delivered && pressAmmoBefore>=0;
                 stopFire(self,true,nullptr);
                 triggerHeldFire=false;
                 pressAmmoBefore=-1;
@@ -1193,7 +1214,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
                 // fire-mode transition) earns a backoff; the retry runs the weapon fire
                 // path even though no round can come out yet. With an unreadable clip
                 // there is no evidence either way, so the tap cadence is kept.
-                if (!delivered && pressAmmoBefore>=0) nextPressMs=now+kIgnoredPressBackoffMs;
+                if (ignoredPress) nextPressMs=now+kIgnoredPressBackoffMs;
                 diagFireTaps.fetch_add(1,std::memory_order_relaxed);
                 Report(DiagnosticStage::FireTapped);
             } else {
