@@ -49,7 +49,18 @@ do_start() {
   fi
   echo $! >"$d/logcat.pid"
   say "logging to $d/logcat.txt"
-  say "now start a match and let it crash. stop with: $0 stop"
+  say "now launch CODM (the mod only logs its base at launch), then: $0 status"
+  say "waiting for the game to log in..."
+  (
+    local i=0
+    while [ "$i" -lt 60 ]; do
+      sleep 2
+      i=$((i + 1))
+      base_line "$d" >/dev/null && { say "mod base: $(base_line "$d")"; exit 0; }
+    done
+    say "no LIQUID line after 2 min - $0 status still works, but check the APK build"
+  ) >"$d/base.log" 2>&1 &
+  say "then play a match until it crashes. stop with: $0 stop"
 
   # Watchdog: when the game process disappears, snapshot the crash buffers and pack.
   (
@@ -102,11 +113,39 @@ do_stop() {
   do_pack "$d"
 }
 
+# The base line is printed once, when the mod attaches to the game. Seeing it proves the
+# new build is installed and loaded; its absence after a launch means there is nothing to
+# symbolise and the run is not worth keeping.
+base_line() {
+  local d="${1:-$(cur)}" line
+  [ -n "$d" ] && [ -f "$d/logcat.txt" ] || return 1
+  line=$(grep -m1 'LIQUID' "$d/logcat.txt" 2>/dev/null) || return 1
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line"
+}
+
 do_pack() {
-  local d="${1:-$(cur)}"
+  local d="${1:-$(cur)}" tmp size
   [ -n "$d" ] && [ -d "$d" ] || { say "nothing to pack"; return 1; }
-  tar -czf "$d.tar.gz" -C "$BASE" "$(basename "$d")" 2>/dev/null &&
-    say "packed: $d.tar.gz ($(du -h "$d.tar.gz" | cut -f1))"
+  # Shared storage here is FUSE-backed and a direct tar write there truncated to 0 bytes
+  # before, so build it in Termux's own storage and copy the finished file over.
+  tmp="${TMPDIR:-$HOME}/$(basename "$d").tar.gz"
+  rm -f "$tmp"
+  if ! tar -czf "$tmp" -C "$BASE" "$(basename "$d")" 2>/dev/null; then
+    say "pack failed (tar)"
+    return 1
+  fi
+  size=$(wc -c <"$tmp" 2>/dev/null || echo 0)
+  if [ "${size:-0}" -lt 1 ] || ! tar -tzf "$tmp" >/dev/null 2>&1; then
+    say "pack produced ${size:-0} bytes and is not a readable archive, not copying:"
+    ls -l "$d"
+    return 1
+  fi
+  if cp -f "$tmp" "$d.tar.gz" 2>/dev/null && [ "$(wc -c <"$d.tar.gz" 2>/dev/null || echo 0)" = "$size" ]; then
+    say "packed: $d.tar.gz ($(du -h "$d.tar.gz" 2>/dev/null | cut -f1))"
+  else
+    say "cannot write to $BASE, kept the archive at: $tmp"
+  fi
 }
 
 do_status() {
@@ -117,6 +156,12 @@ do_status() {
   game_running && say "game: running" || say "game: not running"
   [ -f "$d/logcat.txt" ] && say "log: $(wc -l <"$d/logcat.txt" 2>/dev/null || echo 0) lines" || say "log: missing"
   [ -f "$d/crash-buffer.txt" ] && say "crash buffer: $(wc -l <"$d/crash-buffer.txt" 2>/dev/null || echo 0) lines"
+  if base_line "$d" >/dev/null; then
+    say "mod base: $(base_line "$d")"
+  else
+    say "mod base: MISSING - the mod never logged in this run"
+    say "           start the capture before launching CODM, and check the APK is the new build"
+  fi
 }
 
 case "${1:-help}" in
@@ -125,12 +170,14 @@ case "${1:-help}" in
   stop)   do_stop ;;
   pack)   do_pack "$(cur)" ;;
   status) do_status ;;
+  base)   base_line "$(cur)" || { say "no LIQUID line logged yet"; exit 1; } ;;
   *) cat <<'TXT'
 tb-crash.sh start    start a capture run, then play until it crashes
 tb-crash.sh snap     grab crash buffer / tombstones right now
 tb-crash.sh stop     stop logging, collect tombstones, pack a tar.gz
-tb-crash.sh status   what is running, how much was logged
+tb-crash.sh status   what is running, how much was logged, whether the mod logged its base
 tb-crash.sh pack     pack the current run again
+tb-crash.sh base     print the "libunity base" line from the current run
 
 Root: detected automatically (su). Without root, pair wireless ADB once:
   pkg install android-tools
