@@ -275,6 +275,9 @@ int main() {
     Triggerbot1657::PublishUi(ImVec2{300,400});
     tick();assert(startCalls==0); // ADS only while unscoped
     assert(Triggerbot1657::diagUpdateCount.load()>0);
+    // The scan must run unscoped too. When it did not, the first scoped frame carried
+    // the whole evaluation on top of the scope transition and the game hitched.
+    assert(Triggerbot1657::diagEnemies.load()>0);
     assert(Triggerbot1657::diagStage.load()==static_cast<unsigned>(Triggerbot1657::DiagnosticStage::AdsRequired));
     ads=true;enemy[Class_Pawn__m_IsBot]=1;tick();assert(startCalls==1 && stopCalls==0);
     assert(Triggerbot1657::diagBots.load()==1 && Triggerbot1657::diagEnemies.load()==1);

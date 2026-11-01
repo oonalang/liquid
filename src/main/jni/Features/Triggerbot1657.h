@@ -611,9 +611,13 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
     if (!weapon || !weaponReady) {
         Report(DiagnosticStage::WeaponNotReady); return false;
     }
-    if (modeValue>1 || !ModeAllows(static_cast<Mode>(modeValue),ads)) {
-        Report(DiagnosticStage::AdsRequired); return false;
-    }
+    // The ADS requirement gates the shot, not the work that finds the target. Bailing
+    // out here made the first scoped frame of an ADS-only engagement pay for the whole
+    // scan - snapshot, bone samples and the raycast batch - on top of the scope
+    // transition, which is the one frame that has no room for it. Both mode never
+    // showed the hitch because it spreads that work over every frame.
+    if (modeValue>1) { Report(DiagnosticStage::AdsRequired); return false; }
+    const bool modeAllows=ModeAllows(static_cast<Mode>(modeValue),ads);
     auto* pawn=GamePlay::get_LocalPawn();
     if (!pawn || !validity.IsValid(pawn) || pawn->get_CurrentWeapon()!=weapon) {
         Report(DiagnosticStage::LocalPlayerUnavailable); return false;
@@ -908,6 +912,7 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
                 smokeRejected=true;
                 continue;
             }
+            if (!modeAllows) { Report(DiagnosticStage::AdsRequired); return false; }
             Report(DiagnosticStage::EligibilityPassed);
             return true;
         }
@@ -915,6 +920,9 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         if (smokeRejected) diagSmokeRejections.fetch_add(1,std::memory_order_relaxed);
         if (!castsRemaining) break;
     }
+    // The scan ran but nothing was usable; the reason the shot is refused is still the
+    // mode, so that is what the diagnostic should say.
+    if (!modeAllows) { Report(DiagnosticStage::AdsRequired); return false; }
     if (diagSmokeRejections.load(std::memory_order_relaxed)) Report(DiagnosticStage::SmokeBlocked);
     else if (diagWallRejections.load(std::memory_order_relaxed)) Report(DiagnosticStage::WallBlocked);
     else if (diagDotMatches.load(std::memory_order_relaxed)) Report(DiagnosticStage::SnapshotUnavailable);
