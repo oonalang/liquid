@@ -4,6 +4,7 @@
 #include "FTools/Icon.h"
 #include "Features/HealthBarOverlay.h"
 #include "Features/EnemyListSnapshot1657.h"
+#include "Features/EnemyReadGuard1657.h"
 #include <cmath>
 #include <iostream>
 #include <malloc.h>
@@ -110,10 +111,14 @@ uintptr_t GetClosestTarget() {
             [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
             enemySnapshot)) return 0;
 
+    const std::int64_t nowMs = EnemyReadGuard1657::NowMs();
     for (int i = 0; i < enemySnapshot.count; i++) {
         const auto Pawn = enemySnapshot.pawns[i];
         if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
-        if (!*(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive)) continue;
+        // A pawn the game is tearing down still passes the pointer check.
+        if (!EnemyReadGuard1657::Settled(Pawn, nowMs)) continue;
+        bool alive = false;
+        if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, alive) || !alive) continue;
 
         auto m_Mesh = *(Transform**)(Pawn + Class_Pawn__m_Mesh);
         if (!m_Mesh || !Tools::IsPtrValid(m_Mesh)) continue;
@@ -160,10 +165,14 @@ uintptr_t GetInsideFOVTarget() {
             enemySnapshot)) return 0;
 
     const Vector2 v2Middle = Vector2((float)(get_width() / 2), (float)(get_height() / 2));
+    const std::int64_t nowMs = EnemyReadGuard1657::NowMs();
     for (int i = 0; i < enemySnapshot.count; i++) {
         const auto Pawn = enemySnapshot.pawns[i];
         if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
-        if (!*(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive)) continue;
+        // A pawn the game is tearing down still passes the pointer check.
+        if (!EnemyReadGuard1657::Settled(Pawn, nowMs)) continue;
+        bool alive = false;
+        if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, alive) || !alive) continue;
 
         auto m_HeadBone = * (Transform * *)(Pawn + Class_Pawn__m_HeadBone);
         if (!m_HeadBone || !Tools::IsPtrValid(m_HeadBone)) continue;
@@ -511,13 +520,18 @@ ApplySpeedhack();
             if (!EnemyListSnapshot1657::Read(EnemyPawns,
                     [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
                     enemySnapshot) || enemySnapshot.count == 0) return;
+            const std::int64_t nowMs = EnemyReadGuard1657::NowMs();
 
             for (int i = 0; i < enemySnapshot.count; i++) {
                 auto Pawn = enemySnapshot.pawns[i];
                 if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
+                // Under a round flip the list is rebuilt while the bones, mesh and
+                // PlayerInfo behind these addresses are already gone; a mapped page is
+                // not a live object.
+                if (!EnemyReadGuard1657::Settled(Pawn, nowMs)) continue;
 
-                const bool isAlive = *(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive);
-                if (!isAlive) continue;
+                bool isAlive = false;
+                if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, isAlive) || !isAlive) continue;
 
                 auto m_PlayerInfo = *(uintptr_t *)(Pawn + Class_Pawn__m_PlayerInfo);
                 if (!m_PlayerInfo || !Tools::IsPtrValid((void*)m_PlayerInfo)) continue;
@@ -527,7 +541,8 @@ ApplySpeedhack();
                 if (!m_HeadBone || !m_Mesh || !Tools::IsPtrValid(m_HeadBone) ||
                     !Tools::IsPtrValid(m_Mesh)) continue;
 
-                bool isBot = *(bool *)((uintptr_t)Pawn + Class_Pawn__m_IsBot);
+                bool isBot = false;
+                if (!EnemyReadGuard1657::ReadFlag(Pawn, Class_Pawn__m_IsBot, isBot)) continue;
                 if (isBot) {
                     totalBots++;
                 } else {
@@ -743,10 +758,11 @@ if (espCountPending && Config.ESPMenu.Count && Config.ESPMenu.Esp) {
             auto Pawn = enemySnapshot.pawns[i];
             if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
 
-            bool isAlive = *(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive);
-            if (!isAlive) continue;
-            
-            bool isBot = *(bool*)((uintptr_t)Pawn + Class_Pawn__m_IsBot);
+            bool isAlive = false;
+            if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, isAlive) || !isAlive) continue;
+
+            bool isBot = false;
+            if (!EnemyReadGuard1657::ReadFlag(Pawn, Class_Pawn__m_IsBot, isBot)) continue;
             isBot ? totalBots++ : totalEnemies++;
         }
     }

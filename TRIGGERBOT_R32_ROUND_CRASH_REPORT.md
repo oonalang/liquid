@@ -111,3 +111,17 @@ Consequences:
 - Verification is pending on device, without the Gspace container, with the
   triggerbot and the sprint option off, to separate mod calls from the game's own
   identity handling.
+
+## Update: ESP-only reproduction (2026-11-02 06:03)
+
+ESP with only boxes enabled crashed every match at the round flip, while the same
+session with the triggerbot alone did not. The ESP walked `EnemyPawns` with nothing
+but `Tools::IsPtrValid` between the list and the bone read - the same hole the
+triggerbot had: a mapped page belonging to a pawn the game has already destroyed.
+
+`Features/EnemyReadGuard1657.h` now gates every ESP bone read (closest target, FOV
+target, the draw loop and the count panel) on a 300 ms settle window per pawn address,
+and on `IsAlive` / `IsBot` reading exactly 0 or 1. A pawn that reappears after more
+than a second starts a fresh window, so a reused address is never trusted.
+
+Not yet verified on device.
