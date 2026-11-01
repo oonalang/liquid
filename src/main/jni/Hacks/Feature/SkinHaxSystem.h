@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Fields.h"
+#include "CaptureRing.h"
 #include "MythicAttachmentSystem.h"
 #include "KillEffectSelection.h"
 #include "SkinEffectAliases.h"
@@ -96,17 +97,23 @@ static bool Valid(void* p) {
     return p && Tools::IsPtrValid(p);
 }
 
-// Captured config instances are kept for the lifetime of the process. The game
-// creates a fresh set as it loads more content, so an unbounded list grew with every
-// session and every rebuild/scan became slower. Cap it: the database is built from
-// the configs already present, extra ones add nothing.
-static constexpr size_t kMaxCapturedInstances = 2048;
+// Captured config instances are kept for the lifetime of the process, and the game
+// creates a fresh set as it loads more content. The list stays bounded so a long
+// session cannot slow every rebuild down, but the bound is set above the number of
+// configs 1.6.57 actually builds: the old 2048 cap was reached mid-load and turned into
+// a content limit, so every skin constructed after it was refused and never listed.
+static constexpr size_t kMaxCapturedInstances = 16384;
+
+// Every capture is counted so the fingerprint still moves once the lists sit at their
+// ceiling and the oldest entries are being replaced; without it a rebuild would never
+// pick up content the game loaded later in the session.
+inline std::atomic<size_t> gCaptureSequence{0};
 
 static void Capture(std::vector<void*>& out, void* instance) {
     if (!Valid(instance)) return;
     std::lock_guard<std::mutex> lock(gInstanceMutex);
-    if (out.size() >= kMaxCapturedInstances) return;
-    if (std::find(out.begin(), out.end(), instance) == out.end()) out.push_back(instance);
+    CaptureRing::Add(out, kMaxCapturedInstances, instance);
+    gCaptureSequence.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void HookInventory(void* p) { if (gOrigInventory) gOrigInventory(p); Capture(gInventoryInstances, p); }
@@ -153,7 +160,8 @@ static size_t Fingerprint() {
     v = v * 1315423911u + gSightInstances.size();
     v = v * 1315423911u + gKillInstances.size();
     v = v * 1315423911u + gResourceInstances.size();
-    v = v * 1315423911u + WeaponSkinConfigCount();
+    v = v * 1315423911u + gCaptureSequence.load(std::memory_order_relaxed);
+    v = v * 1315423911u + WeaponSkinConfigSequence();
     return v;
 }
 

@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "CaptureRing.h"
+
 
 
 
@@ -32,21 +34,27 @@ std::vector<void*> attachmentConfInstance;
 inline std::mutex mythicCollectorMutex;
 
 // Bounded: captured instances live for the whole process and the game keeps creating
-// configs, so an unbounded list made every scan and fingerprint pass slower the
-// longer a session ran.
-inline constexpr size_t kMaxWeaponSkinConfigs = 512;
+// configs, so an unbounded list made every scan and fingerprint pass slower the longer
+// a session ran. The bound sits above the number of weapon skins 1.6.57 builds, because
+// the old 512 filled up during load and refused every later skin - which also left that
+// skin's mythic attachments unresolved, since the resolver only knows what was captured.
+inline constexpr size_t kMaxWeaponSkinConfigs = 4096;
+inline std::atomic<size_t> weaponSkinConfigSequence{0};
 
 inline void CollectWeaponSkinConfig(void* instance) {
     if (!instance) return;
     std::lock_guard<std::mutex> lock(mythicCollectorMutex);
-    if (weaponSkinConfigInstance.size() >= kMaxWeaponSkinConfigs) return;
-    if (std::find(weaponSkinConfigInstance.begin(), weaponSkinConfigInstance.end(), instance) == weaponSkinConfigInstance.end())
-        weaponSkinConfigInstance.push_back(instance);
+    CaptureRing::Add(weaponSkinConfigInstance, kMaxWeaponSkinConfigs, instance);
+    weaponSkinConfigSequence.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline size_t WeaponSkinConfigCount() {
     std::lock_guard<std::mutex> lock(mythicCollectorMutex);
     return weaponSkinConfigInstance.size();
+}
+
+inline size_t WeaponSkinConfigSequence() {
+    return weaponSkinConfigSequence.load(std::memory_order_relaxed);
 }
 
 inline std::vector<void*> SnapshotWeaponSkinConfigs() {

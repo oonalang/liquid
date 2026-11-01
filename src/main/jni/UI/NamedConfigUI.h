@@ -1,5 +1,6 @@
 #pragma once
 #include "NamedConfigStorage.h"
+#include "NameEntry.h"
 #include "../Features/Gameplay1657Settings.h"
 #include "../Features/CustomDotCrosshair.h"
 #include "../Features/HealthBarOverlay.h"
@@ -20,6 +21,7 @@ static std::string status;
 static bool initialized=false;
 static bool deleteArmed=false;
 static char nameBuffer[64]{};
+static bool nameEditing=false;
 #ifdef STUDIO_STANDALONE_PREVIEW
 static std::string previewFilesDir;
 #endif
@@ -404,6 +406,35 @@ static void InitializeOnce() {
     autoload=NamedConfigStorage::ReadAutoLoad(directory);
     if(!autoload.empty()) LoadSelected(autoload);
 }
+// The overlay has no Android view for the system keyboard to attach to, so this panel
+// draws its own. Every key is a character NamedConfigStorage::ValidName accepts, so a
+// typed name can never be rejected for its characters.
+static void DrawNameKeyboard() {
+    static const char* const rows[]={"1234567890","QWERTYUIOP","ASDFGHJKL","ZXCVBNM"};
+    const float spacing=3.f;
+    const float width=ImGui::GetContentRegionAvail().x;
+    const float cell=(width-spacing*9.f)/10.f;
+    if(cell<1.f) return;
+    const float height=ImGui::GetFrameHeight();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(spacing,spacing));
+    for(const char* row:rows) {
+        const int length=static_cast<int>(std::strlen(row));
+        for(int i=0;i<length;++i) {
+            char label[2]={row[i],'\0'};
+            if(ImGui::Button(label,ImVec2(cell,height)))
+                NameEntry::Append(nameBuffer,sizeof(nameBuffer),row[i]);
+            if(i+1<length) ImGui::SameLine();
+        }
+    }
+    const float wide=(width-spacing*2.f)/3.f;
+    if(ImGui::Button("Space",ImVec2(wide,height))) NameEntry::Append(nameBuffer,sizeof(nameBuffer),' ');
+    ImGui::SameLine();
+    if(ImGui::Button("Del",ImVec2(wide,height))) NameEntry::Backspace(nameBuffer);
+    ImGui::SameLine();
+    if(ImGui::Button("Done",ImVec2(wide,height))) nameEditing=false;
+    ImGui::PopStyleVar();
+}
+
 static void Draw() {
     InitializeOnce();
     if(directory.empty()) {
@@ -414,8 +445,12 @@ static void Draw() {
     ImGui::TextWrapped("Named profiles are stored in this app's private files directory. Only the selected autoload profile is restored at startup.");
     ImGui::Spacing();
     ImGui::TextUnformatted("CONFIG NAME");
+    ImGui::SameLine();
+    if(ImGui::SmallButton(nameEditing?"Hide keys":"Show keys")) nameEditing=!nameEditing;
     ImGui::SetNextItemWidth(-1);
     ImGui::InputText("##config_name",nameBuffer,sizeof(nameBuffer));
+    if(ImGui::IsItemActivated()) nameEditing=true;
+    if(nameEditing) DrawNameKeyboard();
     if(ImGui::Button("Save as new",ImVec2(-1,38))) {
         const std::string name(nameBuffer);
         std::string error;

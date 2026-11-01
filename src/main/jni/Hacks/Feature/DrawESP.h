@@ -29,6 +29,13 @@ int32_t ToColor(float* col) {
 int totalBots, totalEnemies;
 bool isEspReady;
 
+// One frame of ESP work. The on-screen count panel and the aim line do not depend on
+// the pawn being drawn, but they used to sit inside the per-pawn loop: a full lobby
+// then scanned the enemy list once per pawn and drew the same line and panel over
+// themselves n times, which is where the Hardpoint frame time went.
+static unsigned espFrameSerial = 0;
+static bool espCountPending = false;
+
 
 
 Vector2 pushToScreenBorder(Vector2 Pos, Vector2 screen, int borders, int offset) {
@@ -87,45 +94,38 @@ uintptr_t GetClosestTarget() {
 
     auto Gameplay_get_MatchGame = (uintptr_t(*)())(Class_Gameplay__get_MatchGame);
     auto get_MatchGame = Gameplay_get_MatchGame();
+    if (!Tools::IsPtrValid((void*)get_MatchGame)) return 0;
 
-    if (Tools::IsPtrValid((void*)get_MatchGame)) {
-        auto Gameplay_get_LocalPawn = (uintptr_t(*)())(Class_Gameplay__get_LocalPawn);
-        auto LocalPawn = Gameplay_get_LocalPawn();
-        
-        if (LocalPawn) {
-            Vector3 MyPos{0, 0, 0};
-            auto local_m_Mesh = *(Transform**)(LocalPawn + Class_Pawn__m_Mesh);
-            
-            if (local_m_Mesh) {
-                MyPos = local_m_Mesh->get_position();
+    auto Gameplay_get_LocalPawn = (uintptr_t(*)())(Class_Gameplay__get_LocalPawn);
+    auto LocalPawn = Gameplay_get_LocalPawn();
+    if (!LocalPawn || !Tools::IsPtrValid((void*)LocalPawn)) return 0;
 
-                auto EnemyPawns = *(List<uintptr_t>**)(get_MatchGame + Class_BaseGame__EnemyPawns);
-                if (EnemyPawns) {
-                    auto Items = EnemyPawns->getItems();
-                    if (Items) {
-                        for (int i = 0; i < EnemyPawns->getSize(); i++) {
-                            auto Pawn = Items[i];
-                            if (Pawn) {
-                                auto isAlive = *(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive);
-                                if (!isAlive)
-                                    continue;
+    auto local_m_Mesh = *(Transform**)(LocalPawn + Class_Pawn__m_Mesh);
+    if (!local_m_Mesh || !Tools::IsPtrValid(local_m_Mesh)) return 0;
+    const Vector3 MyPos = local_m_Mesh->get_position();
 
-                                auto m_Mesh = *(Transform**)(Pawn + Class_Pawn__m_Mesh);
-                                if (!m_Mesh)
-                                    continue;
+    auto EnemyPawns = *(List<uintptr_t>**)(get_MatchGame + Class_BaseGame__EnemyPawns);
+    EnemyListSnapshot1657::Snapshot enemySnapshot;
+    if (!EnemyListSnapshot1657::Read(EnemyPawns,
+            [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
+            enemySnapshot)) return 0;
 
-                                Vector3 RootPos = m_Mesh->get_position();
-                                float Distance = Vector3::Distance(MyPos, RootPos);
+    for (int i = 0; i < enemySnapshot.count; i++) {
+        const auto Pawn = enemySnapshot.pawns[i];
+        if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
+        if (!*(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive)) continue;
 
-                                if (Distance < MinDist && Distance <= MAX_AIM_DISTANCE) {
-                                    result = Pawn;
-                                    MinDist = Distance;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        auto m_Mesh = *(Transform**)(Pawn + Class_Pawn__m_Mesh);
+        if (!m_Mesh || !Tools::IsPtrValid(m_Mesh)) continue;
+
+        const Vector3 RootPos = m_Mesh->get_position();
+        if (!std::isfinite(RootPos.x) || !std::isfinite(RootPos.y) || !std::isfinite(RootPos.z))
+            continue;
+
+        const float Distance = Vector3::Distance(MyPos, RootPos);
+        if (Distance < MinDist) {
+            result = Pawn;
+            MinDist = Distance;
         }
     }
 
@@ -147,52 +147,53 @@ uintptr_t GetInsideFOVTarget() {
     float MaxDist = std::numeric_limits<float>::infinity();
     auto Gameplay_get_MatchGame = (uintptr_t( *)())(Class_Gameplay__get_MatchGame);
     auto get_MatchGame = Gameplay_get_MatchGame();
-    if (Tools::IsPtrValid((void *)get_MatchGame)) {
-        auto Gameplay_get_LocalPawn = (uintptr_t( *)())(Class_Gameplay__get_LocalPawn);
-        auto LocalPawn = Gameplay_get_LocalPawn();
-        if (LocalPawn) {
-            Vector3 MyPos {0, 0, 0};
+    if (!Tools::IsPtrValid((void *)get_MatchGame)) return 0;
 
-            auto local_m_Mesh = * (Transform * *)(LocalPawn + Class_Pawn__m_Mesh);
-            if (local_m_Mesh) {
-                MyPos = local_m_Mesh->get_position();
-            }
+    auto Gameplay_get_LocalPawn = (uintptr_t( *)())(Class_Gameplay__get_LocalPawn);
+    auto LocalPawn = Gameplay_get_LocalPawn();
+    if (!LocalPawn || !Tools::IsPtrValid((void*)LocalPawn)) return 0;
 
-            auto EnemyPawns = * (List<uintptr_t> * *)(get_MatchGame + Class_BaseGame__EnemyPawns);
-            if (EnemyPawns) {
-                auto Items = EnemyPawns->getItems();
-                if (Items) {
-                    for (int i = 0; i < EnemyPawns->getSize(); i++) {
-                        auto Pawn = Items[i];
-                        if (Pawn) {
-                            auto isAlive = * (bool *)((uintptr_t)Pawn + Pawn_m_IsAlive);
-                            if (!isAlive)
-                                continue;
+    auto EnemyPawns = * (List<uintptr_t> * *)(get_MatchGame + Class_BaseGame__EnemyPawns);
+    EnemyListSnapshot1657::Snapshot enemySnapshot;
+    if (!EnemyListSnapshot1657::Read(EnemyPawns,
+            [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
+            enemySnapshot)) return 0;
 
-                            auto m_HeadBone = * (Transform * *)(Pawn + Class_Pawn__m_HeadBone);
-                            if (!m_HeadBone)
-                                continue;
+    const Vector2 v2Middle = Vector2((float)(get_width() / 2), (float)(get_height() / 2));
+    for (int i = 0; i < enemySnapshot.count; i++) {
+        const auto Pawn = enemySnapshot.pawns[i];
+        if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
+        if (!*(bool*)((uintptr_t)Pawn + Pawn_m_IsAlive)) continue;
 
-                            auto HeadSc = WorldToScreenPoint(m_HeadBone->get_position());
+        auto m_HeadBone = * (Transform * *)(Pawn + Class_Pawn__m_HeadBone);
+        if (!m_HeadBone || !Tools::IsPtrValid(m_HeadBone)) continue;
 
-                            Vector2 v2Middle = Vector2((float)(get_width() / 2), (float)(get_height() / 2));
-                            Vector2 v2Loc = Vector2(HeadSc.x, HeadSc.y);
+        const Vector3 headPos = m_HeadBone->get_position();
+        if (!std::isfinite(headPos.x) || !std::isfinite(headPos.y) || !std::isfinite(headPos.z))
+            continue;
+        auto HeadSc = WorldToScreenPoint(headPos);
+        if (HeadSc.z <= 0) continue;
 
-                            if (isInsideFOV((int)HeadSc.x, (int)HeadSc.y)) {
-                                float Distance = Vector2::Distance(v2Middle, v2Loc);
-
-                                if (Distance < MaxDist) {
-                                    result = Pawn;
-                                    MaxDist = Distance;
-                                }
-                            }
-                        }
-                    }
-                }
+        if (isInsideFOV((int)HeadSc.x, (int)HeadSc.y)) {
+            const float Distance = Vector2::Distance(v2Middle, Vector2(HeadSc.x, HeadSc.y));
+            if (Distance < MaxDist) {
+                result = Pawn;
+                MaxDist = Distance;
             }
         }
     }
     return result;
+}
+
+// The line and the target scan are per frame, not per pawn: every caller inside the
+// draw loop gets the one result computed when the frame started.
+uintptr_t FrameAimTarget() {
+    static unsigned cachedSerial = ~0u;
+    static uintptr_t cachedTarget = 0;
+    if (cachedSerial == espFrameSerial) return cachedTarget;
+    cachedSerial = espFrameSerial;
+    cachedTarget = Config.Aim.By == EAim::Crosshair ? GetInsideFOVTarget() : GetClosestTarget();
+    return cachedTarget;
 }
 
 void ( * oWeaponFireComponent_Instant_CreateBulletLine)(uintptr_t thiz, Vector3 startPos, Vector3 dir, bool isDualFire);
@@ -383,13 +384,13 @@ void Box4Line(ImDrawList * draw, float thicc, int x, int y, int w, int h, int co
 }
 
 void DrawAimLine(ImDrawList* draw, int sWidth, int sHeight) {
-    uintptr_t Target = 0;
-
-    if (Config.Aim.By == EAim::Distance) {
-        Target = GetClosestTarget();
-    } else if (Config.Aim.By == EAim::Crosshair) {
-        Target = GetInsideFOVTarget();
-    }
+    // The call sits inside the per-pawn loop; draw the line once per frame instead of
+    // stacking an identical line on itself for every pawn. The target comes from the
+    // frame cache, so this no longer rescans the enemy list per pawn either.
+    static unsigned drawnSerial = ~0u;
+    if (drawnSerial == espFrameSerial) return;
+    drawnSerial = espFrameSerial;
+    const uintptr_t Target = FrameAimTarget();
 
     if (Target) {
         Vector3 targetPos;
@@ -479,6 +480,8 @@ inline void DrawESPBox(Vector2 screenPos, float height, float width) {
 
 void DrawESP(ImDrawList * draw, int sWidth, int sHeight, float density) {
 ApplySpeedhack();
+    ++espFrameSerial;
+    espCountPending = true;
     if (Config.ESPMenu.Esp) {
 
         auto mainCamera = Camera::get_main(); // CAMERA NG PLAYER WHICH IS AKO / POV KO SYEMPRE.
@@ -730,7 +733,7 @@ if (Config.ESPMenu.Box) {
 
 
 
-if (Config.ESPMenu.Count && Config.ESPMenu.Esp) {
+if (espCountPending && Config.ESPMenu.Count && Config.ESPMenu.Esp) {
     int totalBots = 0;
     int totalEnemies = 0;
     
@@ -788,6 +791,7 @@ if (Config.ESPMenu.Count && Config.ESPMenu.Esp) {
         drawList->AddText(nullptr, 22.0f, playerIconPos, IM_COL32_WHITE, ICON_FA_USER);
         drawList->AddText(playerTextPos, IM_COL32_WHITE, std::to_string(totalEnemies).c_str());
     }
+    espCountPending = false;
 }
                                  
 
@@ -827,13 +831,7 @@ void *AimBot_Func() {
                         bTriggerReady = Pawn_IsAiming(LocalPawn);
                     }
                     if (bTriggerReady) {
-                        uintptr_t Target = 0;
-                        if (Config.Aim.By == EAim::Distance) {
-                            Target = GetClosestTarget();
-                        }
-                        if (Config.Aim.By == EAim::Crosshair) {
-                            Target = GetInsideFOVTarget();
-                        }
+                        const uintptr_t Target = FrameAimTarget();
 
                         if (Target) {
                             Vector3 targetPos;
