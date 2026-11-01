@@ -6,6 +6,7 @@
 
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 static_assert(sizeof(Vector2) == 8, "Expected IL2CPP Unity Vector2 layout");
@@ -95,10 +96,44 @@ inline Vector2 HookBreatheTremblingPos(void* self) {
     return origBreatheTremblingPos ? origBreatheTremblingPos(self) : Vector2(0.0f, 0.0f);
 }
 
+// The weapon consumes this value as the length of its sprint-to-fire raise. Returning
+// exactly zero makes that raise take no time at all: the game starts firing on the
+// frame the sprint ends, while the fire component is still being re-enabled, and any
+// "rate = something / delay" step turns into inf/NaN. Cap it at one hand-off instead:
+// imperceptible, but the game still runs its own transition.
+inline constexpr float kMinSprintToFireDelay = 0.05f;
+// A weapon created a moment ago has no completed raise to shorten. That is the state
+// right after a respawn or a round change, and enabling the option while dead put this
+// hook exactly there on the next spawn. Keep the game's own delay until the same pawn
+// and weapon have been local for this long, then cap.
+inline void* sprintFirePawn = nullptr;
+inline void* sprintFireWeapon = nullptr;
+inline std::int64_t sprintFireChangedMs = 0;
+inline std::int64_t sprintFireSettleMs = 400;
+
+inline std::int64_t SprintFireNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 inline float HookDelaySprintFire(void* self) {
-    if (noSprintToFireDelay.load(std::memory_order_relaxed) && IsLocalEquippedWeapon(self))
-        return 0.0f;
-    return origDelaySprintFire ? origDelaySprintFire(self) : 0.0f;
+    Pawn* pawn = (self && m_unity) ? GamePlay::get_LocalPawn() : nullptr;
+    if (!noSprintToFireDelay.load(std::memory_order_relaxed) || !pawn ||
+        pawn->get_CurrentWeapon() != self)
+        return origDelaySprintFire ? origDelaySprintFire(self) : 0.0f;
+
+    const std::int64_t now = SprintFireNowMs();
+    if (pawn != sprintFirePawn || self != sprintFireWeapon) {
+        sprintFirePawn = pawn;
+        sprintFireWeapon = self;
+        sprintFireChangedMs = now;
+    }
+    if (now - sprintFireChangedMs < sprintFireSettleMs)
+        return origDelaySprintFire ? origDelaySprintFire(self) : 0.0f;
+
+    const float original = origDelaySprintFire ? origDelaySprintFire(self) : 0.0f;
+    if (original <= 0.0f) return original;                       // already instant: leave it
+    return original < kMinSprintToFireDelay ? original : kMinSprintToFireDelay;
 }
 
 inline void (*origWeaponHitFlinch)(void*, float) = nullptr;

@@ -81,6 +81,50 @@ inline std::int64_t pawnChangedMs=0;
 inline bool pawnSettled=true;
 inline bool pendingRelease=false;
 inline constexpr std::int64_t kPawnSettleMs=600;
+// A round transition does not always replace the local pawn: a surviving player keeps
+// it while the round itself is rebuilt underneath (weapon, enemy set, physics, effects).
+// Only act once the (match, pawn, weapon) triple has held still for a few frames, so no
+// fire call and no scan runs against a half-built round. In steady state the window
+// re-arms only when one of the three actually changes, so it adds no input latency.
+inline void* stableMatch=nullptr;
+inline void* stablePawn=nullptr;
+inline void* stableWeapon=nullptr;
+inline unsigned stableFrames=0;
+inline unsigned settleFrames=8;
+// The weapon the held press was issued on. A remembered release is only valid on that
+// same weapon: the replacement weapon never saw the trigger, and running the game's
+// release path on it reaches a fire component that is still being created. That call is
+// game code we cannot guard, which is how a round change took the game down.
+inline const void* pressWeapon=nullptr;
+// Enemy pawns are destroyed and rebuilt at a round change, and (in ranked, where the
+// list holds real players) when someone leaves mid-match. BaseGame.EnemyPawns can keep
+// pointing at such a pawn for a few frames; reading its ragdoll and calling into an
+// animator that is being torn down is game code with no frame of ours to blame. Only
+// read a pawn that has stayed in the list for a moment, and only trust a byte as a bool
+// when it actually is one -- freed blocks do not read as 0/1.
+inline constexpr std::int64_t kEnemySettleMs=300;
+inline std::int64_t enemySettleMs=kEnemySettleMs;
+struct SettledEnemy { const void* pawn=nullptr; std::int64_t firstMs=0; unsigned epoch=0; };
+inline std::array<SettledEnemy,128> settledEnemies{};
+inline unsigned settledEnemyCount=0;
+inline unsigned settledEnemyEpoch=0;
+inline void BeginEnemyEvaluation() {
+    if (++settledEnemyEpoch==0) { settledEnemyCount=0; settledEnemyEpoch=1; return; }
+    unsigned keep=0;
+    for (unsigned i=0;i<settledEnemyCount;++i)
+        if (settledEnemies[i].epoch==settledEnemyEpoch-1) settledEnemies[keep++]=settledEnemies[i];
+    settledEnemyCount=keep;
+}
+inline bool EnemyHasSettled(const void* pawn,std::int64_t now) {
+    for (unsigned i=0;i<settledEnemyCount;++i) {
+        if (settledEnemies[i].pawn!=pawn) continue;
+        settledEnemies[i].epoch=settledEnemyEpoch;
+        return enemySettleMs<=0 || now-settledEnemies[i].firstMs>=enemySettleMs;
+    }
+    if (settledEnemyCount<settledEnemies.size())
+        settledEnemies[settledEnemyCount++]={pawn,now,settledEnemyEpoch};
+    return enemySettleMs<=0;
+}
 inline bool triggerHeldFire=false;
 inline std::int64_t fireTapStartedMs=0;
 // Clip count sampled when the current press was issued; -1 when unreadable. A
@@ -574,7 +618,9 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
     if (!pawn || !validity.IsValid(pawn) || pawn->get_CurrentWeapon()!=weapon) {
         Report(DiagnosticStage::LocalPlayerUnavailable); return false;
     }
-    const bool alive=*reinterpret_cast<const bool*>(reinterpret_cast<std::uintptr_t>(pawn)+Pawn_m_IsAlive);
+    const auto aliveByte=*reinterpret_cast<const std::uint8_t*>(
+        reinterpret_cast<std::uintptr_t>(pawn)+Pawn_m_IsAlive);
+    const bool alive=aliveByte==1;
     if (!alive) { Report(DiagnosticStage::LocalPlayerUnavailable); return false; }
     auto* camera=Camera::get_main();
     if (!camera || !validity.IsValid(camera)) { Report(DiagnosticStage::CameraUnavailable); return false; }
@@ -702,14 +748,16 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         }
     }
 
+    BeginEnemyEvaluation();
     for (int i=0;i<enemySnapshot.count;++i) {
         const std::uintptr_t enemy=enemySnapshot.pawns[i];
         if (!enemy || enemy==reinterpret_cast<std::uintptr_t>(pawn) ||
             !validity.IsValid(reinterpret_cast<void*>(enemy))) continue;
-        if (!*reinterpret_cast<const bool*>(enemy+Pawn_m_IsAlive)) continue;
+        if (*reinterpret_cast<const std::uint8_t*>(enemy+Pawn_m_IsAlive)!=1) continue;
+        if (!EnemyHasSettled(reinterpret_cast<const void*>(enemy),NowMs())) continue;
 
         diagEnemies.fetch_add(1,std::memory_order_relaxed);
-        if (*reinterpret_cast<const bool*>(enemy+Class_Pawn__m_IsBot))
+        if (*reinterpret_cast<const std::uint8_t*>(enemy+Class_Pawn__m_IsBot)==1)
             diagBots.fetch_add(1,std::memory_order_relaxed);
         const auto head=*reinterpret_cast<Transform**>(enemy+Class_Pawn__m_HeadBone);
         const auto root=*reinterpret_cast<Transform**>(enemy+Class_Pawn__m_Mesh);
@@ -989,12 +1037,50 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     const void* currentWeapon=local->get_CurrentWeapon();
     const bool weaponHandleOk=currentWeapon &&
         Tools::IsPtrValid(const_cast<void*>(currentWeapon));
+
+    // Round/weapon stability window. Nothing below this point is allowed to call into
+    // the game while the triple is still moving.
+    if (match!=stableMatch || static_cast<void*>(local)!=stablePawn ||
+        const_cast<void*>(currentWeapon)!=stableWeapon) {
+        // The round (or the weapon, or the pawn) is changing under a press that is
+        // still held. Do not release into the new objects: remember the press and
+        // drop the per-weapon state. It is resolved below once the triple settles.
+        if (triggerHeldFire) {
+            // Never release into the objects that are replacing the ones we pressed:
+            // remember the press and clear only the press state. The per-weapon state
+            // (fire mode, probe, diagnostics) is reset by the weapon-change path below
+            // once the new objects are readable.
+            pendingRelease=true;
+            triggerHeldFire=false;
+            pressAmmoBefore=-1;
+            fireTapStartedMs=0;
+        }
+        stableMatch=match;
+        stablePawn=local;
+        stableWeapon=const_cast<void*>(currentWeapon);
+        stableFrames=0;
+    } else if (stableFrames<settleFrames) {
+        ++stableFrames;
+    }
+    if (stableFrames<settleFrames) {
+        // The round is still assembling. Keep the remembered release (it is resolved
+        // below once the triple settles) and touch nothing else.
+        Report(DiagnosticStage::MatchUnavailable);
+        return;
+    }
+
     if (pendingRelease) {
-        // The press from the previous pawn is still held in the controller's input
-        // state. Release it on a live, settled pawn before anything is pressed again.
-        if (pawnSettled && weaponHandleOk && stopFire) {
+        if (!pressWeapon || currentWeapon!=pressWeapon) {
+            // A different weapon is held now, so this one never saw the press: the game
+            // reset the trigger together with the round. Nothing to release.
+            pendingRelease=false;
+            pressWeapon=nullptr;
+        } else if (weaponHandleOk && stopFire) {
+            // The press from the previous pawn is still held in the controller's input
+            // state. Release it on the very weapon that was pressed.
             stopFire(self,true,nullptr);
             pendingRelease=false;
+            pressWeapon=nullptr;
             Report(DiagnosticStage::FireReleased);
         }
     }
@@ -1015,8 +1101,13 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         if (triggerHeldFire) {
             // Same rule as a round change: never release against a handle that is not
             // readable, keep the release for the first frame that has one.
-            if (weaponHandleOk && stopFire) stopFire(self,true,nullptr);
-            else pendingRelease=true;
+            if (weaponHandleOk && stopFire) {
+                stopFire(self,true,nullptr);
+                pressWeapon=nullptr;
+            } else {
+                // The deferred release is dropped later: it belongs to the old weapon.
+                pendingRelease=true;
+            }
             triggerHeldFire=false;
             Report(DiagnosticStage::FireReleased);
         }
@@ -1076,6 +1167,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         pressReissued=false;
         startFire(self,nullptr);
         triggerHeldFire=true;
+        pressWeapon=currentWeapon;
         fireTapStartedMs=now;
         diagFireRequests.fetch_add(1,std::memory_order_relaxed);
         if (canProbe) {
@@ -1101,8 +1193,13 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         // is what made the next shot feel delayed, so release instantly instead. If the
         // weapon handle is not readable, defer to the pending release instead of
         // running the game's fire path on it.
-        if (weaponHandleOk && stopFire) stopFire(self,true,nullptr);
-        else pendingRelease=true;
+        if (weaponHandleOk && stopFire) {
+            stopFire(self,true,nullptr);
+            pressWeapon=nullptr;
+        } else {
+            // Resolved against the pressed weapon once the round settles.
+            pendingRelease=true;
+        }
         triggerHeldFire=false;
         pressAmmoBefore=-1;
         if (probeActive) {
@@ -1127,6 +1224,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
                 if (verdict==FireMode::Single) {
                     stopFire(self,true,nullptr);
                     triggerHeldFire=false;
+                    pressWeapon=nullptr;
                     pressAmmoBefore=-1;
                     diagFireTaps.fetch_add(1,std::memory_order_relaxed);
                 }

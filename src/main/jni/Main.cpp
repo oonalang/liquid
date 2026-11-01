@@ -1627,6 +1627,10 @@ void Init_Thread()
 
         sleep(1);
     }
+    // Crash reports from the game's own handler carry absolute PCs and no memory map,
+    // so without this line a SIGSEGV inside libunity cannot be turned into an RVA.
+    __android_log_print(ANDROID_LOG_INFO, "LIQUID",
+        "libunity base %p", reinterpret_cast<void*>(m_unity));
 
 
 

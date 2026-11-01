@@ -220,6 +220,10 @@ int main() {
     Triggerbot1657::nativeMaskedLinecastAddress=0;
     Triggerbot1657::nativeLinecastAbi=Triggerbot1657::LinecastAbi::Unverified;
 
+    // Steady-state host tests do not want the per-round stability window unless a
+    // case explicitly switches it on below.
+    Triggerbot1657::settleFrames=0;
+    Triggerbot1657::enemySettleMs=0;
     alignas(16) std::array<unsigned char,0x700> player{};
     alignas(16) std::array<unsigned char,0x700> enemy{};
     alignas(16) std::array<unsigned char,0x300> match{};
@@ -1107,6 +1111,22 @@ int main() {
         projectionScale=1.f;
     }
 
+    // A pawn that just appeared in the enemy list is not read until it settles, so a
+    // pawn the game is still building is never walked; one that leaves and returns
+    // re-arms the gate even when the allocator reuses its address.
+    Triggerbot1657::enemySettleMs=300;
+    const void* freshPawn=reinterpret_cast<const void*>(static_cast<std::uintptr_t>(0x1234));
+    const std::int64_t settledNow=Triggerbot1657::NowMs();
+    Triggerbot1657::BeginEnemyEvaluation();
+    assert(!Triggerbot1657::EnemyHasSettled(freshPawn,settledNow));
+    Triggerbot1657::BeginEnemyEvaluation();
+    assert(Triggerbot1657::EnemyHasSettled(freshPawn,settledNow+400));
+    Triggerbot1657::BeginEnemyEvaluation(); // one frame without it ...
+    Triggerbot1657::BeginEnemyEvaluation(); // ... forgets it
+    assert(!Triggerbot1657::EnemyHasSettled(freshPawn,settledNow+800));
+    Triggerbot1657::settledEnemyCount=0;
+    Triggerbot1657::enemySettleMs=0;
+
     EnemyListSnapshot1657::Snapshot snapshot{};
     auto validListPointer=[](const void* p){ return p!=nullptr; };
     enemyArray.length=0;
@@ -1289,6 +1309,52 @@ int main() {
     Triggerbot1657::pawnSettled=true;
     Triggerbot1657::pendingRelease=false;
     Triggerbot1657::triggerHeldFire=false;
+    Triggerbot1657::ResetLifeState();
+
+    // --- r32: the round transition can keep the pawn and replace the weapon ---
+    // A surviving player keeps the same pawn across rounds while the game builds a new
+    // weapon under it. The remembered release must not run on that replacement weapon,
+    // and nothing may be pressed until the (match, pawn, weapon) triple has settled.
+    Triggerbot1657::settleFrames=0;
+    Triggerbot1657::pendingRelease=false;
+    Triggerbot1657::triggerHeldFire=false;
+    Triggerbot1657::pressWeapon=nullptr;
+    Triggerbot1657::matchSettled=true;
+    Triggerbot1657::pawnSettled=true;
+    Triggerbot1657::fireModeWeapon=nullptr;
+    Triggerbot1657::fireMode=Triggerbot1657::FireMode::Auto;
+    Triggerbot1657::tapHoldMs=1000;
+    Triggerbot1657::uiEnabled=true;
+    Triggerbot1657::uiMode=Triggerbot1657::Mode::Both;
+    probeAmmo=30;ready=true;ads=false;
+    mockSingleFire=false;mockSingleShot=false;mockCanAutoFire=true;
+    CustomDotCrosshair::settings.enabled=true;
+    Triggerbot1657::PublishUi(ImVec2{300,400});
+    tick();
+    assert(Triggerbot1657::triggerHeldFire);
+    const auto startsBeforeRoundTwo=startCalls, stopsBeforeRoundTwo=stopCalls;
+
+    // The round replaces the weapon while the pawn survives.
+    Triggerbot1657::settleFrames=8;
+    int roundTwoWeapon=4242;
+    Pawn::equipped=&roundTwoWeapon;
+    tick();
+    assert(Triggerbot1657::pendingRelease); // remembered, never released into the new weapon
+    assert(stopCalls==stopsBeforeRoundTwo);
+    assert(startCalls==startsBeforeRoundTwo);
+    tick(); // still inside the stability window
+    assert(stopCalls==stopsBeforeRoundTwo && startCalls==startsBeforeRoundTwo);
+
+    Triggerbot1657::settleFrames=0;
+    tick(); // settled: the press belonged to the weapon the round destroyed
+    assert(!Triggerbot1657::pendingRelease);
+    assert(stopCalls==stopsBeforeRoundTwo);
+    assert(startCalls==startsBeforeRoundTwo+1);
+    assert(Triggerbot1657::triggerHeldFire);
+    Pawn::equipped=&weapon;
+    Triggerbot1657::triggerHeldFire=false;
+    Triggerbot1657::pressWeapon=nullptr;
+    Triggerbot1657::pendingRelease=false;
     Triggerbot1657::ResetLifeState();
 
     // A readable clip that did not change must back off after an ignored tap.

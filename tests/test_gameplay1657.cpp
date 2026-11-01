@@ -15,6 +15,7 @@ Pawn* GamePlay::local = nullptr;
 std::uintptr_t m_unity = 1;
 #include "../src/main/jni/Features/Gameplay1657.h"
 static float originalFloat(void*) {return 2.4f;}
+static float originalZeroFloat(void*) {return 0.0f;}
 static bool originalBool(void*) {return true;}
 static int limitCalls = 0;
 static float seenSpeedDecrease = -1, seenIdleDecrease = -1;
@@ -77,7 +78,21 @@ int main() {
     assert(restoredSpeed == speedRate && restoredIdle == idleRate);
     HookLimitSlideTackle(enemySlide);
     assert(limitCalls == 3); // remote players keep their limit
-    assert(HookDelaySprintFire(&sniper) == 0.0f && HookDelaySprintFire(&other) == 2.4f);
+    // A weapon seen for the first time keeps the game's own raise: this is the frame
+    // right after a respawn or round change, where zeroing it crashed.
+    assert(HookDelaySprintFire(&sniper) == 2.4f);
+    sprintFireSettleMs = 0; // settled: the cap applies
+    assert(HookDelaySprintFire(&sniper) == kMinSprintToFireDelay);
+    assert(HookDelaySprintFire(&other) == 2.4f); // remote weapons untouched
+    Weapon fresh;                                // respawned weapon: gate re-arms
+    sprintFireSettleMs = 400;
+    mine.current = &fresh;
+    assert(HookDelaySprintFire(&fresh) == 2.4f);
+    mine.current = &sniper;
+    sprintFireSettleMs = 0;
+    origDelaySprintFire = originalZeroFloat;     // a weapon with no sprint penalty stays instant
+    assert(HookDelaySprintFire(&sniper) == 0.0f);
+    origDelaySprintFire = originalFloat;
     assert(HookBreatheTremblingPos(fireComponent).x == 0.0f);
     testAiming = false;
     assert(HookBreatheTremblingPos(fireComponent).x == 0.3f);
