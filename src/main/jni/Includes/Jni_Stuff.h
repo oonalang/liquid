@@ -282,6 +282,44 @@ std::string getClipboard() {
     return result.c_str();
 }
 
+// One license POST. Every attempt gets a fresh handle so a connection the host
+// dropped cannot leave transfer state behind for the retry.
+static CURLcode PerformLicensePost(const char* endpoint, const std::string& post,
+                                   MemoryStruct& response, long& status, char* networkError) {
+    if (!endpoint || !*endpoint || !networkError) return CURLE_URL_MALFORMAT;
+    CURL* curl = curl_easy_init();
+    if (!curl) return CURLE_FAILED_INIT;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+    headers = curl_slist_append(headers, "Accept: application/json");
+    networkError[0] = '\0';
+    status = 0;
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, networkError);
+    curl_easy_setopt(curl, CURLOPT_URL, endpoint);
+    // Do not forward a license key to an unexpected redirect destination.
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(post.size()));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    // The host is intermittently unresponsive. Fail a dead attempt quickly and
+    // retry, instead of holding the login for a single long timeout.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 12L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+#if defined(__ANDROID__)
+    curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, ethnir_tls::InstallAndroidTrust);
+#endif
+    const CURLcode result = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (headers) curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return result;
+}
+
 // Same signed-license protocol as IMGUI3: POST game, user_key, serial;
 // accept a session only when server payload and signature verify.
 std::string Login(const char* user_key) {
@@ -358,43 +396,42 @@ std::string Login(const char* user_key) {
     curl_free(escapedKey);
     curl_free(escapedSerial);
 
+    curl_easy_cleanup(curl); // Escaping only; each attempt below opens its own handle.
+
     MemoryStruct response{};
     response.memory = static_cast<char*>(calloc(1, 1));
-    if (!response.memory) {
-        curl_easy_cleanup(curl);
-        return "Not enough memory for the license request.";
-    }
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
-    headers = curl_slist_append(headers, "Accept: application/json");
-    char networkError[CURL_ERROR_SIZE] = {};
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, networkError);
-    curl_easy_setopt(curl, CURLOPT_URL, imgui3_license::kEndpoint);
-    // Do not forward a license key to an unexpected redirect destination.
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(post.size()));
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-#if defined(__ANDROID__)
-    curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, ethnir_tls::InstallAndroidTrust);
-#endif
+    if (!response.memory) return "Not enough memory for the license request.";
 
-    const CURLcode error = curl_easy_perform(curl);
+    char networkError[CURL_ERROR_SIZE] = {};
+    CURLcode error = CURLE_COULDNT_CONNECT;
     long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    int attempts = 0;
+    bool retryable = false;
+    for (const char* endpoint : imgui3_license::kEndpoints) {
+        if (!endpoint || !*endpoint) continue;
+        for (int pass = 0; pass < 2; ++pass) {
+            ++attempts;
+            response.size = 0;
+            response.memory[0] = '\0';
+            error = PerformLicensePost(endpoint, post, response, status, networkError);
+            // Only a dropped connection is worth another attempt. A TLS verdict,
+            // a redirect or an HTTP answer is final.
+            retryable = error == CURLE_OPERATION_TIMEDOUT || error == CURLE_COULDNT_CONNECT ||
+                        error == CURLE_COULDNT_RESOLVE_HOST || error == CURLE_GOT_NOTHING;
+            if (!retryable) break;
+        }
+        if (!retryable) break;
+    }
     std::string message;
     if (error != CURLE_OK) {
         // Keep the numeric CURLcode, HTTP status and libcurl's diagnostic;
         // never print the URL query, license key or device identifier.
         const char* reason = networkError[0] ? networkError : curl_easy_strerror(error);
-        if (error == CURLE_PEER_FAILED_VERIFICATION || error == CURLE_SSL_CACERT ||
+        if (error == CURLE_OPERATION_TIMEDOUT || error == CURLE_COULDNT_CONNECT) {
+            message = "License server unreachable (curl " + std::to_string(static_cast<int>(error)) +
+                      ", HTTP " + std::to_string(status) + ", " + std::to_string(attempts) +
+                      " attempts): " + reason;
+        } else if (error == CURLE_PEER_FAILED_VERIFICATION || error == CURLE_SSL_CACERT ||
             error == CURLE_SSL_CERTPROBLEM) {
             message = "SSL verification failed (curl " + std::to_string(static_cast<int>(error)) +
                       "): " + reason;
@@ -422,8 +459,6 @@ std::string Login(const char* user_key) {
             message = verdict.error;
         }
     }
-    if (headers) curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     free(response.memory);
     return bValid ? "OK" : (message.empty() ? "Login failed." : message);
 }

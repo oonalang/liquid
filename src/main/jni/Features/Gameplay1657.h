@@ -63,6 +63,17 @@ inline float HookSlideSpeedDownPct(void* self) {
     return origSlideSpeedDownPct ? origSlideSpeedDownPct(self) : 0.0f;
 }
 
+// LimitSlideTackle() is where the slide component spends its slide budget: each
+// use shortens the next slide (m_SlideTackleLimitDecreaseRate against
+// m_CurrentMaxIdleTime) until the cooldown refuses the input. Suppressing the
+// budget update for the local player keeps every slide at full length instead of
+// only removing the speed penalty, which is what the old hook did.
+inline void (*origLimitSlideTackle)(void*) = nullptr;
+inline void HookLimitSlideTackle(void* self) {
+    if (noSlideFatigue.load(std::memory_order_relaxed) && IsLocalSlideComponent(self)) return;
+    if (origLimitSlideTackle) origLimitSlideTackle(self);
+}
+
 inline bool HookCanCrouch(void* self) {
     if (noCrouch.load(std::memory_order_relaxed) && IsLocalPawn(self))
         return false;

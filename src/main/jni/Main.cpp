@@ -1748,6 +1748,7 @@ void Init_Thread()
 
 
     HOOK_LIB("libunity.so", "0x8BFE2CC", Gameplay1657::HookSlideSpeedDownPct, Gameplay1657::origSlideSpeedDownPct);
+    HOOK_LIB("libunity.so", "0x8BF7234", Gameplay1657::HookLimitSlideTackle, Gameplay1657::origLimitSlideTackle);
     HOOK_LIB("libunity.so", "0x54B6820", Gameplay1657::HookCanCrouch, Gameplay1657::origCanCrouch);
     HOOK_LIB("libunity.so", "0xC9BD880", Gameplay1657::HookBreatheTremblingPos, Gameplay1657::origBreatheTremblingPos);
     HOOK_LIB("libunity.so", "0x513CBC4", Gameplay1657::HookDelaySprintFire, Gameplay1657::origDelaySprintFire);

@@ -16,6 +16,8 @@ std::uintptr_t m_unity = 1;
 #include "../src/main/jni/Features/Gameplay1657.h"
 static float originalFloat(void*) {return 2.4f;}
 static bool originalBool(void*) {return true;}
+static int limitCalls = 0;
+static void originalLimit(void*) { ++limitCalls; }
 static Vector2 originalSway(void*) {return Vector2(0.3f, 0.7f);}
 static bool testAiming = true;
 static bool testSniper = true;
@@ -25,6 +27,7 @@ int main() {
     using namespace Gameplay1657;
     origCanCrouch = originalBool;
     origSlideSpeedDownPct = originalFloat;
+    origLimitSlideTackle = originalLimit;
     origDelaySprintFire = originalFloat;
     origBreatheTremblingPos = originalSway;
     fnPawnIsAiming = mockedAim;
@@ -44,6 +47,8 @@ int main() {
     std::memcpy(fireComponent + 0x10, &weaponPtr, sizeof(void*));
     assert(HookCanCrouch(&mine));
     assert(HookSlideSpeedDownPct(slide) == 2.4f);
+    HookLimitSlideTackle(slide);
+    assert(limitCalls == 1);
     assert(HookBreatheTremblingPos(fireComponent).x == 0.3f);
     assert(HookDelaySprintFire(&sniper) == 2.4f);
     uiNoCrouch = uiNoSlideFatigue = uiNoAimDrift = uiNoSprintToFireDelay = true;
@@ -51,6 +56,10 @@ int main() {
     assert(!HookCanCrouch(&mine) && HookCanCrouch(&enemy));
     assert(HookSlideSpeedDownPct(slide) == 0.0f);
     assert(HookSlideSpeedDownPct(enemySlide) == 2.4f);
+    HookLimitSlideTackle(slide);
+    assert(limitCalls == 1); // fatigue budget not consumed for the local player
+    HookLimitSlideTackle(enemySlide);
+    assert(limitCalls == 2); // remote players keep their limit
     assert(HookDelaySprintFire(&sniper) == 0.0f && HookDelaySprintFire(&other) == 2.4f);
     assert(HookBreatheTremblingPos(fireComponent).x == 0.0f);
     testAiming = false;
@@ -67,6 +76,8 @@ int main() {
     SyncFromUi();
     assert(HookCanCrouch(&mine));
     assert(HookSlideSpeedDownPct(slide) == 2.4f);
+    HookLimitSlideTackle(slide);
+    assert(limitCalls == 3); // restored
     assert(HookDelaySprintFire(&sniper) == 2.4f);
     puts("PASS: CODM 1.6.57 hook policy tests (off/on, local/remote, restoration)");
 }

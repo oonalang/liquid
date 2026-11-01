@@ -9,7 +9,7 @@ namespace Triggerbot1657 {
 
 
 
-inline constexpr const char* kDiagnosticBuildLabel = "1657-r28 / scope-transition fire, fair LOS budget";
+inline constexpr const char* kDiagnosticBuildLabel = "1657-r29 / slide-budget skip, match-swap guard";
 
 
 

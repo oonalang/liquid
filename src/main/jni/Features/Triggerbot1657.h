@@ -63,6 +63,13 @@ inline bool (*weaponCanAutoFire)(void*,const void*) = nullptr;    // Weapon.get_
 inline bool (*weaponIsSingleShot)(void*,const void*) = nullptr;   // Weapon.get_IsSingleShot()
 
 inline void* lastController=nullptr;
+// MatchGame is a new object for every match. The previous match's pawn, controller
+// and weapon are torn down around that swap, so firing across it reaches objects the
+// game is already destroying.
+inline void* lastMatchGame=nullptr;
+inline std::int64_t matchChangedMs=0;
+inline bool matchSettled=true;
+inline constexpr std::int64_t kMatchSettleMs=1500;
 inline bool triggerHeldFire=false;
 inline std::int64_t fireTapStartedMs=0;
 // Clip count sampled when the current press was issued; -1 when unreadable. A
@@ -852,6 +859,12 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
 }
 
 
+inline void* CurrentMatchGame() {
+    if (!m_unity) return nullptr;
+    const auto gameFn=reinterpret_cast<std::uintptr_t(*)()>(Class_Gameplay__get_MatchGame);
+    return reinterpret_cast<void*>(gameFn());
+}
+
 inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     if (originalUpdateLocalPawn) originalUpdateLocalPawn(self,dt,methodInfo);
     if (!self || !originalUpdateLocalPawn || !Tools::IsPtrValid(self)) {
@@ -884,6 +897,20 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         Report(DiagnosticStage::LocalControllerMismatch);
         return;
     }
+
+    void* match=CurrentMatchGame();
+    if (match!=lastMatchGame) {
+        // Release first: a press issued in the old match must not stay held on a
+        // controller that is being destroyed with it.
+        if (triggerHeldFire && stopFire) stopFire(self,true,nullptr);
+        ResetLifeState();
+        previousLocalAlive=false;
+        lastController=self;
+        matchSettled=lastMatchGame==nullptr;
+        lastMatchGame=match;
+        matchChangedMs=NowMs();
+    }
+    if (!matchSettled && NowMs()-matchChangedMs>=kMatchSettleMs) matchSettled=true;
 
     if (self!=lastController) {
         ResetLifeState();
@@ -945,11 +972,13 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     // magazine, equip time and the shot cooldown still block it, and the game still
     // refuses a round it cannot deliver.
     const bool weaponReady=validApis && currentWeapon && healthy &&
+        Tools::IsPtrValid(const_cast<void*>(currentWeapon)) &&
         (triggerHeldFire || canFire(local,true,nullptr));
     if (!enabledNow) Report(DiagnosticStage::Disabled);
+    else if (!matchSettled) Report(DiagnosticStage::MatchUnavailable);
     else if (!healthy) Report(DiagnosticStage::LocalPlayerUnavailable);
     else if (!validApis || !weaponReady) Report(DiagnosticStage::WeaponNotReady);
-    const bool shouldFire=enabledNow && validApis && weaponReady &&
+    const bool shouldFire=enabledNow && validApis && weaponReady && matchSettled &&
         EligibleFromLocalView(const_cast<void*>(currentWeapon),ads,weaponReady);
 
     const auto now=NowMs();

@@ -16,6 +16,12 @@
 
 namespace imgui3_license {
 static constexpr const char* kEndpoint = "https://ethnir.x10.mx/connect";
+// The same panel answers on both host names of the account. The host drops
+// connection attempts in bursts, so the alias is tried before giving up.
+static constexpr const char* kEndpoints[] = {
+    kEndpoint,
+    "https://www.ethnir.x10.mx/connect"
+};
 static constexpr const char* kGame = "CODMGR";
 static constexpr const char* kModulus =
     "C61010F4D55F6586D543EE585BA0884E687FCFC6C397316664E4EB483F602D41304F60BC7BB37DA65046522663D79E81"

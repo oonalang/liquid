@@ -1162,6 +1162,37 @@ int main() {
     assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     Triggerbot1657::pawnFirePosition=nullptr;
     Triggerbot1657::pawnEyePosition=nullptr;
+    // --- r29: a new MatchGame must not inherit the previous match's fire state ---
+    // The match object is replaced for every new match and the old pawn, controller
+    // and weapon are torn down around that swap. A press still held there runs the
+    // game's fire path on objects the previous match already destroyed, which is what
+    // took the game down when a second match was started.
+    Triggerbot1657::nextPressMs=0;
+    Triggerbot1657::fireMode=Triggerbot1657::FireMode::Unknown;
+    Triggerbot1657::fireModeWeapon=nullptr;
+    Triggerbot1657::triggerHeldFire=false;
+    Triggerbot1657::matchSettled=true;
+    mockSingleFire=false;mockSingleShot=false;mockCanAutoFire=true;
+    probeAmmo=30;ready=true;ads=false;
+    Triggerbot1657::tapHoldMs=1000;
+    Triggerbot1657::uiEnabled=true;
+    Triggerbot1657::uiMode=Triggerbot1657::Mode::Both;
+    CustomDotCrosshair::settings.enabled=true;
+    Triggerbot1657::PublishUi(ImVec2{300,400});
+    tick();
+    assert(Triggerbot1657::triggerHeldFire);
+    const auto startsBeforeNewMatch=startCalls;
+    const auto stopsBeforeNewMatch=stopCalls;
+    Triggerbot1657::lastMatchGame=reinterpret_cast<void*>(1); // stale: a new match replaced it
+    tick();
+    assert(stopCalls==stopsBeforeNewMatch+1);   // the held press is released on the swap
+    assert(startCalls==startsBeforeNewMatch);   // and nothing is pressed until it settles
+    assert(!Triggerbot1657::matchSettled);
+    Triggerbot1657::matchChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kMatchSettleMs;
+    tick();
+    assert(Triggerbot1657::matchSettled);
+    assert(startCalls==startsBeforeNewMatch+1); // fires again once the new match is up
+
     Triggerbot1657::weaponIsSingleFire=nullptr;
     Triggerbot1657::weaponIsSingleShot=nullptr;
     Triggerbot1657::weaponCanAutoFire=nullptr;
