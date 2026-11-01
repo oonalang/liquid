@@ -972,7 +972,9 @@ int main() {
     const auto startsBeforeDeath=startCalls;
     player[Pawn_m_IsAlive]=0;
     tick();
-    assert(stopCalls==stopsBeforeDeath+1);
+    // r30: the release is deferred, so StopFire never runs on the pawn that is dying.
+    assert(stopCalls==stopsBeforeDeath);
+    assert(Triggerbot1657::pendingRelease);
     assert(startCalls==startsBeforeDeath);
     assert(!Triggerbot1657::triggerHeldFire);
     assert(!Triggerbot1657::probeActive);
@@ -987,7 +989,7 @@ int main() {
     assert(Triggerbot1657::diagFireRequests.load()==0);
     assert(Triggerbot1657::diagProbes.load()==0);
     for (int i=0;i<8;++i) tick();
-    assert(stopCalls==stopsBeforeDeath+1);
+    assert(stopCalls==stopsBeforeDeath);
     assert(startCalls==startsBeforeDeath);
     assert(Triggerbot1657::diagUpdateCount.load()==0);
 
@@ -996,6 +998,8 @@ int main() {
     tick();
     assert(Triggerbot1657::previousLocalAlive);
     assert(Triggerbot1657::lastController==controller.data());
+    assert(stopCalls==stopsBeforeDeath+1); // the held press is released on the live pawn
+    assert(!Triggerbot1657::pendingRelease);
     assert(startCalls==startsBeforeDeath+1);
     assert(Triggerbot1657::triggerHeldFire);
     assert(Triggerbot1657::probeActive);
@@ -1006,14 +1010,15 @@ int main() {
     assert(startCalls==startsBeforeDeath+1);
     player[Pawn_m_IsAlive]=0;
     tick();
-    assert(stopCalls==stopsBeforeDeath+2);
+    assert(stopCalls==stopsBeforeDeath+1); // no release against the dying weapon
     assert(!Triggerbot1657::triggerHeldFire);
     assert(!Triggerbot1657::probeActive);
     tick();
-    assert(stopCalls==stopsBeforeDeath+2);
+    assert(stopCalls==stopsBeforeDeath+1);
 
     player[Pawn_m_IsAlive]=1;
     tick();
+    assert(stopCalls==stopsBeforeDeath+2); // deferred release, on a live pawn
     assert(startCalls==startsBeforeDeath+2);
     assert(Triggerbot1657::diagProbes.load()==1);
 
@@ -1192,6 +1197,54 @@ int main() {
     tick();
     assert(Triggerbot1657::matchSettled);
     assert(startCalls==startsBeforeNewMatch+1); // fires again once the new match is up
+
+    // --- r30: a round change must not run the fire path on the pawn being replaced ---
+    // A round transition replaces the local pawn and destroys the weapon the trigger
+    // was pressing, while the controller may still be holding that press. Releasing it
+    // on the old pawn ran the game's fire path on a destroyed weapon, which is what
+    // took the game down between rounds. The release waits for the new pawn instead.
+    Triggerbot1657::nextPressMs=0;
+    Triggerbot1657::pendingRelease=false;
+    Triggerbot1657::pawnSettled=true;
+    Triggerbot1657::matchSettled=true;
+    Triggerbot1657::fireModeWeapon=nullptr;
+    Triggerbot1657::fireMode=Triggerbot1657::FireMode::Unknown;
+    Triggerbot1657::probeActive=false;
+    mockSingleFire=false;mockSingleShot=false;mockCanAutoFire=true;
+    probeAmmo=30;ready=true;ads=false;
+    Triggerbot1657::tapHoldMs=1000;
+    Triggerbot1657::uiEnabled=true;
+    Triggerbot1657::uiMode=Triggerbot1657::Mode::Both;
+    CustomDotCrosshair::settings.enabled=true;
+    Triggerbot1657::PublishUi(ImVec2{300,400});
+    tick();
+    assert(Triggerbot1657::triggerHeldFire);
+    const auto startsBeforeRound=startCalls;
+    const auto stopsBeforeRound=stopCalls;
+    alignas(16) std::array<unsigned char,0x700> nextRoundPlayer{};
+    nextRoundPlayer[Pawn_m_IsAlive]=1;
+    void* nextRoundLocal=reinterpret_cast<void*>(nextRoundPlayer.data());
+    std::memcpy(controller.data()+0x78,&nextRoundLocal,sizeof(nextRoundLocal));
+    GamePlay::local=reinterpret_cast<Pawn*>(nextRoundPlayer.data());
+    tick(); // the pawn changed: neither press nor release may touch the old weapon
+    assert(!Triggerbot1657::pawnSettled);
+    assert(stopCalls==stopsBeforeRound);
+    assert(startCalls==startsBeforeRound);
+    assert(Triggerbot1657::pendingRelease);
+    Triggerbot1657::pawnChangedMs=Triggerbot1657::NowMs()-Triggerbot1657::kPawnSettleMs;
+    tick(); // settled: release the old press on the live pawn, then fire again
+    assert(Triggerbot1657::pawnSettled);
+    assert(!Triggerbot1657::pendingRelease);
+    assert(stopCalls==stopsBeforeRound+1);
+    assert(startCalls==startsBeforeRound+1);
+    void* originalLocal=reinterpret_cast<void*>(player.data());
+    std::memcpy(controller.data()+0x78,&originalLocal,sizeof(originalLocal));
+    GamePlay::local=reinterpret_cast<Pawn*>(player.data());
+    tick();
+    Triggerbot1657::pawnSettled=true;
+    Triggerbot1657::pendingRelease=false;
+    Triggerbot1657::triggerHeldFire=false;
+    Triggerbot1657::ResetLifeState();
 
     Triggerbot1657::weaponIsSingleFire=nullptr;
     Triggerbot1657::weaponIsSingleShot=nullptr;

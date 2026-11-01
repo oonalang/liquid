@@ -70,6 +70,16 @@ inline void* lastMatchGame=nullptr;
 inline std::int64_t matchChangedMs=0;
 inline bool matchSettled=true;
 inline constexpr std::int64_t kMatchSettleMs=1500;
+// A round transition or a respawn replaces the local pawn, and the weapon that was
+// pressed belongs to the pawn being torn down. Releasing on it ran the game's fire
+// path against a weapon that was already gone, which is what took the game down
+// between rounds; the release is remembered and issued on the first settled frame of
+// the new pawn instead.
+inline void* lastLocalPawn=nullptr;
+inline std::int64_t pawnChangedMs=0;
+inline bool pawnSettled=true;
+inline bool pendingRelease=false;
+inline constexpr std::int64_t kPawnSettleMs=600;
 inline bool triggerHeldFire=false;
 inline std::int64_t fireTapStartedMs=0;
 // Clip count sampled when the current press was issued; -1 when unreadable. A
@@ -900,9 +910,10 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
 
     void* match=CurrentMatchGame();
     if (match!=lastMatchGame) {
-        // Release first: a press issued in the old match must not stay held on a
-        // controller that is being destroyed with it.
-        if (triggerHeldFire && stopFire) stopFire(self,true,nullptr);
+        // A press issued in the old match must not stay held on a controller that is
+        // being destroyed with it. As at a round change, the release is deferred to the
+        // first settled frame instead of running against the dying objects.
+        if (triggerHeldFire) pendingRelease=true;
         ResetLifeState();
         previousLocalAlive=false;
         lastController=self;
@@ -911,6 +922,20 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         matchChangedMs=NowMs();
     }
     if (!matchSettled && NowMs()-matchChangedMs>=kMatchSettleMs) matchSettled=true;
+
+    if (local!=lastLocalPawn) {
+        // Round change or respawn: drop the press without touching the game, and do
+        // nothing else until the new pawn has had a moment to finish initialising.
+        if (triggerHeldFire) pendingRelease=true;
+        ResetLifeState();
+        // The first pawn seen after injection is not a transition, so it is settled at
+        // once; only a replacement pawn has to wait out the window.
+        pawnSettled=lastLocalPawn==nullptr;
+        lastLocalPawn=local;
+        pawnChangedMs=NowMs();
+        previousLocalAlive=false;
+    }
+    if (!pawnSettled && NowMs()-pawnChangedMs>=kPawnSettleMs) pawnSettled=true;
 
     if (self!=lastController) {
         ResetLifeState();
@@ -921,10 +946,11 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     const bool healthy=*reinterpret_cast<const bool*>(
         reinterpret_cast<std::uintptr_t>(local)+Pawn_m_IsAlive);
     if (!healthy) {
+        // The pawn is dead or being destroyed. Releasing the press here would run the
+        // game's fire path on the weapon that is going away, so the release is only
+        // remembered; it is issued once there is a live pawn to release it on.
+        if (triggerHeldFire) pendingRelease=true;
         if (previousLocalAlive || triggerHeldFire || probeActive || fireModeWeapon) {
-            if (triggerHeldFire && stopFire) {
-                stopFire(self,true,nullptr);
-            }
             ResetLifeState();
         }
         previousLocalAlive=false;
@@ -932,6 +958,7 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         return;
     }
     if (!previousLocalAlive) {
+        if (triggerHeldFire) pendingRelease=true;
         ResetLifeState();
         previousLocalAlive=true;
     }
@@ -940,6 +967,17 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
 
     const bool enabledNow=enabled.load(std::memory_order_acquire);
     const void* currentWeapon=local->get_CurrentWeapon();
+    const bool weaponHandleOk=currentWeapon &&
+        Tools::IsPtrValid(const_cast<void*>(currentWeapon));
+    if (pendingRelease) {
+        // The press from the previous pawn is still held in the controller's input
+        // state. Release it on a live, settled pawn before anything is pressed again.
+        if (pawnSettled && weaponHandleOk && stopFire) {
+            stopFire(self,true,nullptr);
+            pendingRelease=false;
+            Report(DiagnosticStage::FireReleased);
+        }
+    }
 
     if (fireModeWeapon!=currentWeapon) {
         fireModeWeapon=currentWeapon;
@@ -954,8 +992,11 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         pressReissued=false;
         probeFailures=!getClipAmmo ? kMaxProbeAttempts : 0;
         diagProbeSpent.store(probeFailures>=kMaxProbeAttempts,std::memory_order_relaxed);
-        if (triggerHeldFire && stopFire) {
-            stopFire(self,true,nullptr);
+        if (triggerHeldFire) {
+            // Same rule as a round change: never release against a handle that is not
+            // readable, keep the release for the first frame that has one.
+            if (weaponHandleOk && stopFire) stopFire(self,true,nullptr);
+            else pendingRelease=true;
             triggerHeldFire=false;
             Report(DiagnosticStage::FireReleased);
         }
@@ -971,14 +1012,14 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     // the scope settles instead of one whole transition later; reload, empty
     // magazine, equip time and the shot cooldown still block it, and the game still
     // refuses a round it cannot deliver.
-    const bool weaponReady=validApis && currentWeapon && healthy &&
-        Tools::IsPtrValid(const_cast<void*>(currentWeapon)) &&
+    const bool weaponReady=validApis && weaponHandleOk && healthy &&
         (triggerHeldFire || canFire(local,true,nullptr));
     if (!enabledNow) Report(DiagnosticStage::Disabled);
     else if (!matchSettled) Report(DiagnosticStage::MatchUnavailable);
     else if (!healthy) Report(DiagnosticStage::LocalPlayerUnavailable);
     else if (!validApis || !weaponReady) Report(DiagnosticStage::WeaponNotReady);
     const bool shouldFire=enabledNow && validApis && weaponReady && matchSettled &&
+        pawnSettled && !pendingRelease &&
         EligibleFromLocalView(const_cast<void*>(currentWeapon),ads,weaponReady);
 
     const auto now=NowMs();
@@ -1037,8 +1078,11 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
     } else if (!shouldFire && triggerHeldFire) {
         // isImmidiately=true: a gradual release runs the weapon-lower transition, which
         // the game has to finish before the next StartFire is accepted. That transition
-        // is what made the next shot feel delayed, so release instantly instead.
-        stopFire(self,true,nullptr);
+        // is what made the next shot feel delayed, so release instantly instead. If the
+        // weapon handle is not readable, defer to the pending release instead of
+        // running the game's fire path on it.
+        if (weaponHandleOk && stopFire) stopFire(self,true,nullptr);
+        else pendingRelease=true;
         triggerHeldFire=false;
         pressAmmoBefore=-1;
         if (probeActive) {
