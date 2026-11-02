@@ -45,6 +45,8 @@ static constexpr uintptr_t kCurrentBulletTrack = 0xA61AB8C;
 static constexpr uintptr_t kCurrentBroadcast = 0xA61ADFC;
 static constexpr uintptr_t kExtraKillEffectGroup = 0xC3661B0;
 static constexpr uintptr_t kDecorKillEffectGroup = 0xC37F1D0;
+static constexpr uintptr_t kExtraKillEffectLevel = 0xC3664F8;
+static constexpr uintptr_t kDecorKillEffectLevel = 0xC37F25C;
 
 using Constructor = void (*)(void*);
 using EffectGetter = int (*)(void*);
@@ -81,8 +83,11 @@ inline EffectGetter gOrigBulletTrack = nullptr;
 inline EffectGetter gOrigBroadcast = nullptr;
 inline std::uint32_t (*gOrigExtraKillEffectGroup)(void*) = nullptr;
 inline std::uint32_t (*gOrigDecorKillEffectGroup)(void*) = nullptr;
+inline std::uint8_t (*gOrigExtraKillEffectLevel)(void*) = nullptr;
+inline std::uint8_t (*gOrigDecorKillEffectLevel)(void*) = nullptr;
 
 inline std::unordered_map<int, int> gActiveKillEffects;
+inline std::unordered_map<int, int> gActiveMythicKillLevels;
 inline std::unordered_map<int, int> gActiveFireEffects;
 inline std::unordered_map<int, int> gActiveBulletEffects;
 inline std::unordered_map<int, int> gActiveBroadcastEffects;
@@ -582,6 +587,8 @@ static void ApplyToCurrentInstances(const itemInfo& skin) {
     {
         std::lock_guard<std::mutex> lock(gEffectMutex);
         ApplyEffectAliases(gActiveKillEffects, aliases, skin.WeaponExtra[4]);
+        ApplyEffectAliases(gActiveMythicKillLevels, aliases,
+            skin.WeaponConf[1]==5 && skin.WeaponExtra[4]>0 ? 5 : 0);
         ApplyEffectAliases(gActiveFireEffects, aliases, skin.WeaponAsset[1]);
         ApplyEffectAliases(gActiveBulletEffects, aliases, skin.WeaponAsset[1]);
         ApplyEffectAliases(gActiveBroadcastEffects, aliases, skin.WeaponConf[3]);
@@ -654,6 +661,33 @@ static std::uint32_t HookDecorKillEffectGroup(void* decorations) {
     return gOrigDecorKillEffectGroup ? gOrigDecorKillEffectGroup(decorations) : 0;
 }
 
+
+// Level 5 is authored only for a selected mythic with a resolved effect ID.
+// Other levels and decoration values are provided by the game unchanged.
+static std::uint8_t HookExtraKillEffectLevel(void* extra) {
+    if (Valid(extra)) {
+        const auto* bytes=reinterpret_cast<const std::uint8_t*>(extra);
+        const std::array<int,3> ids{
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x28)),
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x20)),
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x30))
+        };
+        std::lock_guard<std::mutex> lock(gEffectMutex);
+        if (SkinEffectLookup::Find(gActiveMythicKillLevels,ids)==5) return 5;
+    }
+    return gOrigExtraKillEffectLevel ? gOrigExtraKillEffectLevel(extra) : 0;
+}
+static std::uint8_t HookDecorKillEffectLevel(void* decorations) {
+    if (decorations) {
+        const int id=CurrentWeaponId();
+        if (id>0) {
+            std::lock_guard<std::mutex> lock(gEffectMutex);
+            const auto found=gActiveMythicKillLevels.find(id);
+            if (found!=gActiveMythicKillLevels.end() && found->second==5) return 5;
+        }
+    }
+    return gOrigDecorKillEffectLevel ? gOrigDecorKillEffectLevel(decorations) : 0;
+}
 
 static bool InstallOne(uintptr_t base, uintptr_t rva, void* hook, void** orig) {
     void* target = reinterpret_cast<void*>(base + rva);
@@ -732,6 +766,10 @@ inline bool InstallRuntimeOnly() {
                (void**)&gOrigExtraKillEffectGroup);
     InstallOne(base, kDecorKillEffectGroup, (void*)HookDecorKillEffectGroup,
                (void**)&gOrigDecorKillEffectGroup);
+    InstallOne(base, kExtraKillEffectLevel, (void*)HookExtraKillEffectLevel,
+               (void**)&gOrigExtraKillEffectLevel);
+    InstallOne(base, kDecorKillEffectLevel, (void*)HookDecorKillEffectLevel,
+               (void**)&gOrigDecorKillEffectLevel);
     InstallMythicAttachmentRuntimeFresh(base);
     return true;
 }
