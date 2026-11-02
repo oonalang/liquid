@@ -1488,6 +1488,39 @@ static float speed_min = 0.5f;
 
 #include "UI/ApplicationUI.h"
 
+// These two getters are 8-byte routines in 1.6.57. Patch exactly eight
+// bytes so the existing LimitSlideTackle hook at 0x8BF7234 stays untouched.
+static void UpdateSlideLimitPatches() {
+    static MemoryPatch baseLimit;
+    static MemoryPatch pveLimit;
+    static bool initialized=false;
+    static bool applied=false;
+    if (!m_unity) return;
+    if (!initialized) {
+        baseLimit=MemoryPatch::createWithHex("libunity.so",0x8BF722C,
+                                            "00 00 80 D2 C0 03 5F D6");
+        pveLimit=MemoryPatch::createWithHex("libunity.so",0x651274C,
+                                           "00 00 80 D2 C0 03 5F D6");
+        initialized=baseLimit.isValid() && pveLimit.isValid();
+        if (!initialized) return;
+    }
+    const bool want=Gameplay1657::uiNoSlideFatigue;
+    if (want==applied) return;
+    if (want) {
+        const bool baseOk=baseLimit.Modify();
+        const bool pveOk=pveLimit.Modify();
+        if (baseOk && pveOk) applied=true;
+        else {
+            if (baseOk) baseLimit.Restore();
+            if (pveOk) pveLimit.Restore();
+        }
+    } else {
+        const bool baseOk=baseLimit.Restore();
+        const bool pveOk=pveLimit.Restore();
+        if (baseOk && pveOk) applied=false;
+    }
+}
+
 EGLBoolean (*old_eglSwapBuffers)(EGLDisplay dpy, EGLSurface surface);
 EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   if (!Config.ImGuiMenu.g_Initialized) {
@@ -1577,6 +1610,7 @@ AimBot_Func();
 
 StudioUI::Draw(); //[span_7](start_span)[span_7](end_span)[span_8](start_span)[span_8](end_span)
 Gameplay1657::SyncFromUi();
+UpdateSlideLimitPatches();
 
 
 
