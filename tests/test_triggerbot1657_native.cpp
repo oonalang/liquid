@@ -742,9 +742,9 @@ int main() {
     assert(eligibleLocal());
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     assert(originState(Triggerbot1657::RayOrigin::Eye)==stateName(Triggerbot1657::OriginState::NotTried)); // eye not needed
-    assert(lastFrom.x==0.f && lastFrom.y==0.f && lastFrom.z==0.f); // single cast from the muzzle
+    assert(lastFrom.x==0.f && lastFrom.y==0.f && lastFrom.z==0.f); // single cast from the camera
 
-    // A blocked muzzle falls through to the next usable origin instead of refusing.
+    // The camera path remains usable even if the muzzle is covered.
     fireOriginBlocked=true;
     assert(eligibleLocal());
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
@@ -754,7 +754,7 @@ int main() {
     fireOriginBlocked=false;cameraOriginBlocked=true;
     assert(!eligibleLocal());
     assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
-    assert(originState(Triggerbot1657::RayOrigin::Camera)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(originState(Triggerbot1657::RayOrigin::Camera)==stateName(Triggerbot1657::OriginState::Blocked));
 
     // The reported case: low cover swallows muzzle, eye and head (a player standing
     // flush against it) while the camera still sees the enemy. It must fire.
