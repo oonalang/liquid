@@ -491,7 +491,7 @@ void DrawESP(ImDrawList * draw, int sWidth, int sHeight, float density) {
 ApplySpeedhack();
     ++espFrameSerial;
     espCountPending = true;
-    if (Config.ESPMenu.Esp) {
+    if (Config.ESPMenu.Box || Config.ESPMenu.isPlayerLine || Config.ESPMenu.Health || Config.ESPMenu.Name || Config.ESPMenu.Distance || Config.ESPMenu.Alert || Config.ESPMenu.Vehicles || Config.ESPMenu.Count || Config.ESPMenu.Crosshair || Config.ESPMenu.Aimline) {
 
         auto mainCamera = Camera::get_main(); // CAMERA NG PLAYER WHICH IS AKO / POV KO SYEMPRE.
         if (!mainCamera || !Tools::IsPtrValid(mainCamera)) return;
@@ -748,7 +748,7 @@ if (Config.ESPMenu.Box) {
 
 
 
-if (espCountPending && Config.ESPMenu.Count && Config.ESPMenu.Esp) {
+if (espCountPending && Config.ESPMenu.Count) {
     int totalBots = 0;
     int totalEnemies = 0;
     
@@ -768,7 +768,7 @@ if (espCountPending && Config.ESPMenu.Count && Config.ESPMenu.Esp) {
     }
 
 
-    if ((totalBots > 0 || totalEnemies > 0) && Config.ESPMenu.Esp) {
+    if ((totalBots > 0 || totalEnemies > 0)) {
         ImDrawList* drawList = ImGui::GetForegroundDrawList();
         if (!drawList) return;
 

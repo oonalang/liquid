@@ -1,6 +1,8 @@
 #pragma once
 #include "NamedConfigStorage.h"
 #include "NameEntry.h"
+#include "SharedKeyboard.h"
+#include <chrono>
 #include "../Features/Gameplay1657Settings.h"
 #include "../Features/CustomDotCrosshair.h"
 #include "../Features/HealthBarOverlay.h"
@@ -74,7 +76,6 @@ static std::string AppFilesDirectory() {
 static Json Capture() {
     Json j=Json::object();
 #define SAVE_FIELD(field) j[#field] = field
-    SAVE_FIELD(Config.ESPMenu.Esp);
     SAVE_FIELD(Config.ESPMenu.isPlayerLine);
     SAVE_FIELD(Config.ESPMenu.Box);
     SAVE_FIELD(Config.ESPMenu.Health);
@@ -223,7 +224,6 @@ static bool Validate(const Json& j,std::string& error) {
 }
 static void Apply(const Json& j) {
 #define LOAD_FIELD(field) if(j.contains(#field)) field=j.at(#field).get<std::decay_t<decltype(field)>>()
-    LOAD_FIELD(Config.ESPMenu.Esp);
     LOAD_FIELD(Config.ESPMenu.isPlayerLine);
     LOAD_FIELD(Config.ESPMenu.Box);
     LOAD_FIELD(Config.ESPMenu.Health);
@@ -397,11 +397,18 @@ static void SetPreviewFilesDirectory(const std::string& path) {
 #endif
 static void InitializeOnce() {
     if(initialized) return;
-    initialized=true;
+    // Android's Application object might not exist on the first overlay frame.
+    // Retry without performing JNI/file work on every render.
+    static auto retryAfter=std::chrono::steady_clock::time_point{};
+    const auto now=std::chrono::steady_clock::now();
+    if(now<retryAfter) return;
+    retryAfter=now+std::chrono::seconds(1);
     const std::string appFiles=AppFilesDirectory();
-    if(appFiles.empty()) {status="App files directory unavailable";return;}
-    directory=appFiles+"/ethnir_configs";
-    if(!NamedConfigStorage::EnsureDirectory(directory)) {status="Cannot create config folder";return;}
+    if(appFiles.empty()) {status="Waiting for app files directory";return;}
+    const std::string configDir=appFiles+"/ethnir_configs";
+    if(!NamedConfigStorage::EnsureDirectory(configDir)) {status="Cannot create config folder";return;}
+    directory=configDir;
+    initialized=true;
     Refresh();
     autoload=NamedConfigStorage::ReadAutoLoad(directory);
     if(!autoload.empty()) LoadSelected(autoload);
@@ -410,29 +417,7 @@ static void InitializeOnce() {
 // draws its own. Every key is a character NamedConfigStorage::ValidName accepts, so a
 // typed name can never be rejected for its characters.
 static void DrawNameKeyboard() {
-    static const char* const rows[]={"1234567890","QWERTYUIOP","ASDFGHJKL","ZXCVBNM"};
-    const float spacing=3.f;
-    const float width=ImGui::GetContentRegionAvail().x;
-    const float cell=(width-spacing*9.f)/10.f;
-    if(cell<1.f) return;
-    const float height=ImGui::GetFrameHeight();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(spacing,spacing));
-    for(const char* row:rows) {
-        const int length=static_cast<int>(std::strlen(row));
-        for(int i=0;i<length;++i) {
-            char label[2]={row[i],'\0'};
-            if(ImGui::Button(label,ImVec2(cell,height)))
-                NameEntry::Append(nameBuffer,sizeof(nameBuffer),row[i]);
-            if(i+1<length) ImGui::SameLine();
-        }
-    }
-    const float wide=(width-spacing*2.f)/3.f;
-    if(ImGui::Button("Space",ImVec2(wide,height))) NameEntry::Append(nameBuffer,sizeof(nameBuffer),' ');
-    ImGui::SameLine();
-    if(ImGui::Button("Del",ImVec2(wide,height))) NameEntry::Backspace(nameBuffer);
-    ImGui::SameLine();
-    if(ImGui::Button("Done",ImVec2(wide,height))) nameEditing=false;
-    ImGui::PopStyleVar();
+    SharedKeyboard::DrawInline(nameBuffer,sizeof(nameBuffer),"profile_name",true,&nameEditing);
 }
 
 static void Draw() {

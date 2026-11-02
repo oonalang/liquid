@@ -18,6 +18,7 @@
 #include "MythicAttachmentSystem.h"
 #include "KillEffectSelection.h"
 #include "SkinEffectAliases.h"
+#include "../../UI/SharedKeyboard.h"
 #include "KillEffectCompatibility.h"
 
 namespace OblivionSkinHax {
@@ -731,7 +732,8 @@ inline void DrawPanel(float scale) {
     if (ImGui::InputText("##SKINHAX_SEARCH", searchQuery, sizeof(searchQuery))) {}
     if (ImGui::IsItemClicked() || ImGui::IsItemActive()) gSearchKeyboard = true;
     ImGui::SameLine();
-    if (ImGui::Button("KEYBOARD", ImVec2(130.0f * scale, buttonH))) gSearchKeyboard = !gSearchKeyboard;
+    if (ImGui::Button(gSearchKeyboard ? "HIDE KEYS" : "KEYBOARD", ImVec2(130.0f * scale, buttonH))) gSearchKeyboard = !gSearchKeyboard;
+    if (gSearchKeyboard) SharedKeyboard::DrawInline(searchQuery,sizeof(searchQuery),"skin_search",false,&gSearchKeyboard);
 
     int rarityCounts[5] = {(int)db.size(), 0, 0, 0, 0};
     for (const auto& skin : db) {
@@ -818,8 +820,7 @@ inline void DrawPanel(float scale) {
     if (ImGui::Button("APPLY SELECTED SKIN", ImVec2(-1, buttonH))) SelectSkin(pending);
     if (!canApply) ImGui::EndDisabled();
 
-    DrawDetachedSearchKeyboard("##SKINHAX_KEYBOARD", "SEARCH WEAPON SKIN",
-                               searchQuery, sizeof(searchQuery), &gSearchKeyboard);
+
 }
 
 } // namespace OblivionSkinHax

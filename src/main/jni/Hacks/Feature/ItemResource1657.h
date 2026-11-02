@@ -29,11 +29,13 @@ inline void ApplyItemResourceFields(
     ItemResourceFields& fields,
     const std::array<int, 3>& models,
     const std::array<uint16_t, 4>& sprites) {
-    fields.FxAssetID = models[0];
-    fields.InventoryModelID = models[1];
-    fields.ModelAssetIDRaw = models[2];
-    fields.UIMiniSpriteName = sprites[0];
-    fields.UISmallSpriteName = sprites[1];
-    fields.UISpriteName = sprites[2];
-    fields.UISquareSpriteName = sprites[3];
+    // Some skins have no authored loadout model or sprite. Never overwrite a
+    // valid equipped model with a missing (zero) reference.
+    if (models[0] > 0) fields.FxAssetID = models[0];
+    if (models[1] > 0) fields.InventoryModelID = models[1];
+    if (models[2] > 0) fields.ModelAssetIDRaw = models[2];
+    if (sprites[0] != 0) fields.UIMiniSpriteName = sprites[0];
+    if (sprites[1] != 0) fields.UISmallSpriteName = sprites[1];
+    if (sprites[2] != 0) fields.UISpriteName = sprites[2];
+    if (sprites[3] != 0) fields.UISquareSpriteName = sprites[3];
 }

@@ -34,7 +34,6 @@ static const char* Sections[][4]={
 };
 static void Visuals() {
     Section("OVERLAY");
-    Toggle("Enable ESP", &Config.ESPMenu.Esp);
     Toggle("Player lines", &Config.ESPMenu.isPlayerLine);
     Toggle("Player boxes", &Config.ESPMenu.Box);
     Toggle("Health", &Config.ESPMenu.Health);
@@ -219,7 +218,7 @@ static void SkinHaxControls() {
 
 static int EnabledCount(int page) {
     switch(page) {
-        case 0: return Config.ESPMenu.Esp+Config.ESPMenu.isPlayerLine+Config.ESPMenu.Box+
+        case 0: return Config.ESPMenu.isPlayerLine+Config.ESPMenu.Box+
             Config.ESPMenu.Health+Config.ESPMenu.Name+Config.ESPMenu.Distance+Config.ESPMenu.Alert+
             Config.ESPMenu.Vehicles+Config.ExtraMenu.Spectate+checkboxStates["wallhack"]+
             Config.ExtraMenu.Radar1+checkboxStates["BRTAGS"];
