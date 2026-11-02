@@ -14,6 +14,7 @@
 
 #include "Fields.h"
 #include "CaptureRing.h"
+#include "SkinScanSchedule.h"
 #include "MythicAttachmentSystem.h"
 #include "KillEffectSelection.h"
 #include "SkinEffectAliases.h"
@@ -86,7 +87,6 @@ inline std::atomic<bool> gRuntimeInstalled{false};
 inline std::atomic<bool> gWorkerStarted{false};
 inline std::atomic<bool> gDatabaseReady{false};
 inline std::atomic<bool> gScanRequested{false};
-inline size_t gLastUiBuildFingerprint = 0;
 inline std::unordered_map<int, itemInfo> gAppliedSkins;
 inline itemInfo gSelectedSkin{};
 inline std::string gSelectedName;
@@ -482,14 +482,14 @@ static bool BuildDatabase() {
         return ToLower(a.itemName) < ToLower(b.itemName);
     });
 
-    const bool ready = !built.empty();
+    if (built.empty()) return false;
     {
         std::lock_guard<std::mutex> lock(gDatabaseMutex);
         itemData.swap(built);
         nameCountMap.clear();
     }
-    gDatabaseReady.store(ready, std::memory_order_release);
-    return gDatabaseReady.load(std::memory_order_acquire);
+    gDatabaseReady.store(true, std::memory_order_release);
+    return true;
 }
 
 static void ApplyToCurrentInstances(const itemInfo& skin) {
@@ -625,38 +625,16 @@ static bool InstallOne(uintptr_t base, uintptr_t rva, void* hook, void** orig) {
 }
 
 static void Worker() {
-    size_t previousFingerprint = 0;
-    size_t lastBuiltFingerprint = 0;
-    int stablePasses = 0;
+    SkinScanSchedule::Gate refresh;
 
     while (gInstalled.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-
-
-
-
         if (!gScanRequested.load(std::memory_order_acquire)) continue;
 
-        const size_t current = Fingerprint();
-        if (current == 0) {
-            stablePasses = 0;
-            previousFingerprint = 0;
-            continue;
-        }
-
-        if (current == previousFingerprint)
-            ++stablePasses;
-        else
-            stablePasses = 0;
-        previousFingerprint = current;
-
-
-
-
-        if (stablePasses < 1 || current == lastBuiltFingerprint) continue;
-
-        if (BuildDatabase())
-            lastBuiltFingerprint = current;
+        const size_t fingerprint = Fingerprint();
+        if (!refresh.ShouldBuild(fingerprint)) continue;
+        if (!BuildDatabase()) continue;
+        refresh.MarkBuilt(fingerprint);
 
         std::vector<itemInfo> applied;
         {
@@ -745,12 +723,7 @@ inline void DrawPanel(float scale) {
 
 
 
-    const size_t uiFingerprint = Fingerprint();
-    if (!gDatabaseReady.load(std::memory_order_acquire) &&
-        uiFingerprint != 0 && uiFingerprint != gLastUiBuildFingerprint) {
-        gLastUiBuildFingerprint = uiFingerprint;
-        BuildDatabase();
-    }
+
 
     const std::vector<itemInfo> db = DatabaseSnapshot();
     const float buttonH = std::max(36.0f, 42.0f * scale);
