@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include "MythicAttachmentSystem.h"
 #include "KillEffectSelection.h"
 #include "SkinEffectAliases.h"
+#include "SkinEffectLookup.h"
 #include "../../UI/SharedKeyboard.h"
 #include "KillEffectCompatibility.h"
 
@@ -41,6 +43,8 @@ static constexpr uintptr_t kCurrentKillEffect = 0xA61AC70;
 static constexpr uintptr_t kCurrentFireEffect = 0xA61AAA8;
 static constexpr uintptr_t kCurrentBulletTrack = 0xA61AB8C;
 static constexpr uintptr_t kCurrentBroadcast = 0xA61ADFC;
+static constexpr uintptr_t kExtraKillEffectGroup = 0xC3661B0;
+static constexpr uintptr_t kDecorKillEffectGroup = 0xC37F1D0;
 
 using Constructor = void (*)(void*);
 using EffectGetter = int (*)(void*);
@@ -75,6 +79,8 @@ inline EffectGetter gOrigKillEffect = nullptr;
 inline EffectGetter gOrigFireEffect = nullptr;
 inline EffectGetter gOrigBulletTrack = nullptr;
 inline EffectGetter gOrigBroadcast = nullptr;
+inline std::uint32_t (*gOrigExtraKillEffectGroup)(void*) = nullptr;
+inline std::uint32_t (*gOrigDecorKillEffectGroup)(void*) = nullptr;
 
 inline std::unordered_map<int, int> gActiveKillEffects;
 inline std::unordered_map<int, int> gActiveFireEffects;
@@ -618,6 +624,37 @@ static int HookFireEffect(void* p) { return ResolveEffect(p, gOrigFireEffect, gA
 static int HookBulletEffect(void* p) { return ResolveEffect(p, gOrigBulletTrack, gActiveBulletEffects); }
 static int HookBroadcast(void* p) { return ResolveEffect(p, gOrigBroadcast, gActiveBroadcastEffects); }
 
+// The 1.6.57 effect group is also read through the network decoration paths.
+// Only override when an applied skin owns the relevant item alias. Every other
+// weapon uses the game's own original getter and effect metadata.
+static std::uint32_t HookExtraKillEffectGroup(void* extra) {
+    if (Valid(extra)) {
+        const auto* bytes=reinterpret_cast<const std::uint8_t*>(extra);
+        const std::array<int,3> ids{
+            *reinterpret_cast<const std::uint32_t*>(bytes+0x28), // ItemID
+            *reinterpret_cast<const std::uint32_t*>(bytes+0x20), // VirtualItemID
+            *reinterpret_cast<const std::uint32_t*>(bytes+0x30)  // BluePrintID
+        };
+        std::lock_guard<std::mutex> lock(gEffectMutex);
+        const int selected=SkinEffectLookup::Find(gActiveKillEffects,ids);
+        if (selected>0) return static_cast<std::uint32_t>(selected);
+    }
+    return gOrigExtraKillEffectGroup ? gOrigExtraKillEffectGroup(extra) : 0;
+}
+static std::uint32_t HookDecorKillEffectGroup(void* decorations) {
+    if (decorations) {
+        const int selected=CurrentWeaponId();
+        if (selected>0) {
+            std::lock_guard<std::mutex> lock(gEffectMutex);
+            const auto found=gActiveKillEffects.find(selected);
+            if (found!=gActiveKillEffects.end() && found->second>0)
+                return static_cast<std::uint32_t>(found->second);
+        }
+    }
+    return gOrigDecorKillEffectGroup ? gOrigDecorKillEffectGroup(decorations) : 0;
+}
+
+
 static bool InstallOne(uintptr_t base, uintptr_t rva, void* hook, void** orig) {
     void* target = reinterpret_cast<void*>(base + rva);
     if (!Valid(target)) return false;
@@ -691,6 +728,10 @@ inline bool InstallRuntimeOnly() {
     InstallOne(base, kCurrentFireEffect, (void*)HookFireEffect, (void**)&gOrigFireEffect);
     InstallOne(base, kCurrentBulletTrack, (void*)HookBulletEffect, (void**)&gOrigBulletTrack);
     InstallOne(base, kCurrentBroadcast, (void*)HookBroadcast, (void**)&gOrigBroadcast);
+    InstallOne(base, kExtraKillEffectGroup, (void*)HookExtraKillEffectGroup,
+               (void**)&gOrigExtraKillEffectGroup);
+    InstallOne(base, kDecorKillEffectGroup, (void*)HookDecorKillEffectGroup,
+               (void**)&gOrigDecorKillEffectGroup);
     InstallMythicAttachmentRuntimeFresh(base);
     return true;
 }
