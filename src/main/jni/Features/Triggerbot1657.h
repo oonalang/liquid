@@ -14,6 +14,7 @@
 #include "Triggerbot1657Policy.h"
 #include "Triggerbot1657Hitboxes.h"
 #include "EnemyListSnapshot1657.h"
+#include "EnemyObjectStability1657.h"
 #include "CustomDotCrosshair.h"
 #include "Triggerbot1657Diagnostics.h"
 #include "Triggerbot1657LinecastAbi.h"
@@ -106,6 +107,11 @@ inline constexpr std::int64_t kEnemySettleMs=300;
 inline std::int64_t enemySettleMs=kEnemySettleMs;
 struct SettledEnemy { const void* pawn=nullptr; std::int64_t firstMs=0; unsigned epoch=0; };
 inline std::array<SettledEnemy,128> settledEnemies{};
+// Each enemy pawn address can survive a round while its Unity transforms and
+// animator are replaced. Do not dereference those objects on their first frames.
+inline EnemyObjectStability1657::Tracker<> enemyBoneGuard{};
+inline EnemyObjectStability1657::Tracker<> enemyAnimationGuard{};
+inline EnemyObjectStability1657::Tracker<> enemyAnimatorGuard{};
 inline unsigned settledEnemyCount=0;
 inline unsigned settledEnemyEpoch=0;
 inline void BeginEnemyEvaluation() {
@@ -174,6 +180,9 @@ inline unsigned probeFailures=kMaxProbeAttempts;
 inline std::int64_t nextLegacyDiagnosticProbeMs=0;
 
 inline void ResetLifeState() {
+    enemyBoneGuard.Reset();
+    enemyAnimationGuard.Reset();
+    enemyAnimatorGuard.Reset();
     triggerHeldFire=false;
     fireTapStartedMs=0;
     pressAmmoBefore=-1;
@@ -749,13 +758,19 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         }
     }
 
+    if (enemySnapshot.count==0) {
+        enemyBoneGuard.Reset();
+        enemyAnimationGuard.Reset();
+        enemyAnimatorGuard.Reset();
+    }
     BeginEnemyEvaluation();
     for (int i=0;i<enemySnapshot.count;++i) {
         const std::uintptr_t enemy=enemySnapshot.pawns[i];
         if (!enemy || enemy==reinterpret_cast<std::uintptr_t>(pawn) ||
             !validity.IsValid(reinterpret_cast<void*>(enemy))) continue;
         if (*reinterpret_cast<const std::uint8_t*>(enemy+Pawn_m_IsAlive)!=1) continue;
-        if (!EnemyHasSettled(reinterpret_cast<const void*>(enemy),NowMs())) continue;
+        const std::int64_t enemyNowMs=NowMs();
+        if (!EnemyHasSettled(reinterpret_cast<const void*>(enemy),enemyNowMs)) continue;
 
         diagEnemies.fetch_add(1,std::memory_order_relaxed);
         if (*reinterpret_cast<const std::uint8_t*>(enemy+Class_Pawn__m_IsBot)==1)
@@ -763,6 +778,9 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
         const auto head=*reinterpret_cast<Transform**>(enemy+Class_Pawn__m_HeadBone);
         const auto root=*reinterpret_cast<Transform**>(enemy+Class_Pawn__m_Mesh);
         if (!head || !root || !validity.IsValid(head) || !validity.IsValid(root)) continue;
+        if (!enemyBoneGuard.Stable(enemy,
+               reinterpret_cast<std::uintptr_t>(head),
+               reinterpret_cast<std::uintptr_t>(root),enemyNowMs)) continue;
         const Vector3 headPos=head->get_position(), rootPos=root->get_position();
         if (!Finite3(headPos) || !Finite3(rootPos)) continue;
         const Vector3 headScreen=WorldToScreenPoint(headPos);
@@ -794,12 +812,17 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
 
         const auto* animationComponent=*reinterpret_cast<void* const*>(enemy+0x538);
         void* animator=nullptr;
-        if (validity.IsValid(animationComponent)) {
+        if (validity.IsValid(animationComponent) &&
+            enemyAnimationGuard.Stable(enemy,
+                reinterpret_cast<std::uintptr_t>(animationComponent),0,enemyNowMs)) {
             animator=*reinterpret_cast<void* const*>(
                 reinterpret_cast<std::uintptr_t>(animationComponent)+0x20);
         }
         bool humanoid=false;
-        if (animator && validity.IsValid(animator) && animatorIsHuman && animatorBoneTransform)
+        if (animator && validity.IsValid(animator) && animatorIsHuman && animatorBoneTransform &&
+            enemyAnimatorGuard.Stable(enemy,
+                reinterpret_cast<std::uintptr_t>(animator),
+                reinterpret_cast<std::uintptr_t>(animationComponent),enemyNowMs))
             humanoid=animatorIsHuman(animator,nullptr);
         if (humanoid) {
             struct Bone { Hitboxes::Joint joint; int humanBone; };

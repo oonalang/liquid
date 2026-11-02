@@ -5,6 +5,7 @@
 #include "Features/HealthBarOverlay.h"
 #include "Features/EnemyListSnapshot1657.h"
 #include "Features/EnemyReadGuard1657.h"
+#include "Features/EnemyObjectStability1657.h"
 #include "Features/EspBoxGuard1657.h"
 #include <cmath>
 #include <iostream>
@@ -38,6 +39,7 @@ bool isEspReady;
 static unsigned espFrameSerial = 0;
 static bool espCountPending = false;
 static EspBoxGuard1657::Tracker espBoxGuard;
+static EnemyObjectStability1657::Tracker<> espHealthGuard;
 
 
 
@@ -497,24 +499,24 @@ ApplySpeedhack();
 
         auto mainCamera = Camera::get_main(); // CAMERA NG PLAYER WHICH IS AKO / POV KO SYEMPRE.
         if (!mainCamera || !Tools::IsPtrValid(mainCamera)) {
-            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); espHealthGuard.Reset(); return;
         }
 
         auto Gameplay_get_MatchGame = (uintptr_t (*)())(Class_Gameplay__get_MatchGame);
         auto get_MatchGame = Gameplay_get_MatchGame();
 
         if (!get_MatchGame || !Tools::IsPtrValid((void*)get_MatchGame)) {
-            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); espHealthGuard.Reset(); return;
         }
 
         auto Gameplay_get_LocalPawn = (uintptr_t (*)())(Class_Gameplay__get_LocalPawn);
         auto LocalPawn = Gameplay_get_LocalPawn();
         if (!LocalPawn || !Tools::IsPtrValid((void*)LocalPawn)) {
-            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); espHealthGuard.Reset(); return;
         }
         bool localAlive=false;
         if (!EnemyReadGuard1657::ReadFlag(LocalPawn,Pawn_m_IsAlive,localAlive) || !localAlive) {
-            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); espHealthGuard.Reset(); return;
         }
         // Box-only ESP does not need the local mesh transform.
         const bool needDistance=Config.ESPMenu.Distance || Config.ESPMenu.Alert || Config.ESPMenu.Name;
@@ -532,18 +534,32 @@ ApplySpeedhack();
 
             auto EnemyPawns = *(List<uintptr_t> **)(get_MatchGame + Class_BaseGame__EnemyPawns);
             if (!EnemyPawns || !Tools::IsPtrValid(EnemyPawns)) {
-                espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+                espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); espHealthGuard.Reset(); return;
             }
             if (!espBoxGuard.Observe({get_MatchGame,LocalPawn,
                                      reinterpret_cast<std::uintptr_t>(EnemyPawns),
                                      reinterpret_cast<std::uintptr_t>(mainCamera)})) {
                 EnemyReadGuard1657::Reset();
+                espHealthGuard.Reset();
                 return;
             }
             EnemyListSnapshot1657::Snapshot enemySnapshot;
             if (!EnemyListSnapshot1657::Read(EnemyPawns,
                     [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
-                    enemySnapshot) || enemySnapshot.count == 0) return;
+                    enemySnapshot)) {
+                espBoxGuard.Reset();
+                EnemyReadGuard1657::Reset();
+                espHealthGuard.Reset();
+                return;
+            }
+            // Empty enemy lists are a lifecycle boundary. Invalidate old
+            // pawn/health identities before the next round reuses their addresses.
+            if (enemySnapshot.count == 0) {
+                espBoxGuard.Reset();
+                EnemyReadGuard1657::Reset();
+                espHealthGuard.Reset();
+                return;
+            }
             const std::int64_t nowMs = EnemyReadGuard1657::NowMs();
 
             for (int i = 0; i < enemySnapshot.count; i++) {
@@ -699,7 +715,11 @@ if (Config.ESPMenu.Box) {
 
                         if (Config.ESPMenu.Health) {
                             auto m_AttackableInfo = * (uintptr_t *)(Pawn + Class_AttackableTarget__m_AttackableInfo);
-                            if (m_AttackableInfo && Tools::IsPtrValid((void*)m_AttackableInfo)) {
+                            // Mapped pointers can refer to freed AttackableInfo after
+                            // a respawn. Only read after this pawn's health object
+                            // identity has stayed consistent across several frames.
+                            if (m_AttackableInfo && Tools::IsPtrValid((void*)m_AttackableInfo) &&
+                                espHealthGuard.Stable(Pawn,m_AttackableInfo,0,nowMs)) {
                                 const float health = *(float *)(m_AttackableInfo + Class_AttackableTarget__m_Health);
                                 const float maximum = *(float *)(m_AttackableInfo + Class_AttackableTarget__m_MaxHealth);
                                 const auto bar=HealthBarOverlay::Calculate(
@@ -791,6 +811,7 @@ if (espCountPending && Config.ESPMenu.Count) {
         for (int i = 0; i < enemySnapshot.count; i++) {
             auto Pawn = enemySnapshot.pawns[i];
             if (!Pawn || !Tools::IsPtrValid((void*)Pawn)) continue;
+            if (!EnemyReadGuard1657::Settled(Pawn,nowMs)) continue;
 
             bool isAlive = false;
             if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, isAlive) || !isAlive) continue;
