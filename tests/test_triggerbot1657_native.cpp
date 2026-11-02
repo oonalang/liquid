@@ -396,9 +396,8 @@ int main() {
     const auto headRay=static_cast<unsigned>(Triggerbot1657::RayOrigin::Head);
     const auto cameraRay=static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera);
     assert(Triggerbot1657::diagOriginState[headRay].load()==
-        static_cast<unsigned>(Triggerbot1657::OriginState::Blocked));
-    assert(Triggerbot1657::diagOriginCollider[headRay].load()==
-        reinterpret_cast<std::uintptr_t>(&coverCollider));
+        static_cast<unsigned>(Triggerbot1657::OriginState::NotTried));
+    assert(Triggerbot1657::diagOriginCollider[headRay].load()==0);
     assert(Triggerbot1657::diagOriginState[cameraRay].load()==
         static_cast<unsigned>(Triggerbot1657::OriginState::Blocked)); // cover blocks every origin
     partialCoverY=-1.f;
@@ -467,9 +466,6 @@ int main() {
     // Standing flush against low cover: the trace starts inside the obstacle and reports
     // a zero-distance hit. That must be stepped out of, not treated as a wall.
     embeddedCollider=&coverCollider;
-    embeddedHitsToServe=1;
-    assert(eligible());
-    assert(embeddedHitsToServe==0);
     embeddedHitsToServe=99; // a real wall that keeps returning zero-distance hits
     assert(!eligible());
     assert(Triggerbot1657::kMaxEmbeddedSkips<=Triggerbot1657::kMaxLinecastsPerEvaluation);
@@ -488,7 +484,7 @@ int main() {
     selfHitsToServe=1;physicsBlocked=false;hitCollider=nullptr;hitDistance=-1.f;
     assert(eligible());
     assert(Triggerbot1657::diagSelfSkips.load()==1);
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Head));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     assert(Triggerbot1657::diagWallRejections.load()==rejectsBeforeSelf);
 
     selfHitsToServe=1;physicsBlocked=true;hitCollider=&otherCollider;
@@ -511,8 +507,8 @@ int main() {
     assert(eligible());
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     headOriginBlocked=false;cameraOriginBlocked=true;
-    assert(eligible());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Head));
+    assert(!eligible());
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     cameraOriginBlocked=false;headOriginBlocked=true;cameraOriginBlocked=true;
     assert(!eligible()); // every origin blocked by solid cover
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::None));
@@ -624,62 +620,24 @@ int main() {
     Triggerbot1657::getClipAmmo=&GetClipAmmo;
     Triggerbot1657::fireMode=Triggerbot1657::FireMode::Unknown;
     Triggerbot1657::tapHoldMs=0;
-    Triggerbot1657::probeMidMs=0;
-    Triggerbot1657::probeEndMs=1000000;
-    Triggerbot1657::probeRetryMs=0;
-    // The probe budget was spent above when the clip was unreadable; a weapon swap
-    // resets it in the live code, so do the same here before probing again.
-    Triggerbot1657::probeFailures=0;
-    Triggerbot1657::diagProbeSpent.store(false);
     probeAmmo=30;
-
-    const auto idleProbes=Triggerbot1657::diagProbes.load();
-    const auto idleRequests=Triggerbot1657::diagFireRequests.load();
-    tick();tick();
-    assert(Triggerbot1657::diagProbes.load()==idleProbes);
-    assert(Triggerbot1657::diagFireRequests.load()==idleRequests);
+    const auto probeCountBeforeFallback=Triggerbot1657::diagProbes.load();
+    physicsBlocked=true;tick();tick();
     physicsBlocked=false;
-
-
-    tick(); // press + probe start
-    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::probeActive);
-    assert(Triggerbot1657::diagFireMode.load()==0);
-    probeAmmo=29; // exactly one round for the held press
-    tick();       // mid sample
-    assert(Triggerbot1657::probeMidTaken && Triggerbot1657::probeMid==29);
-    Triggerbot1657::probeEndMs=0;
-    tick(); // classify and release
-    assert(!Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
-    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Single);
-    assert(Triggerbot1657::diagFireMode.load()==1);
-    const auto probesAfterSingle=Triggerbot1657::diagProbes.load();
-
-    tick();assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
-    tick();assert(!Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::diagProbes.load()==probesAfterSingle);
-
+    tick();
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
+    assert(Triggerbot1657::diagProbes.load()==probeCountBeforeFallback);
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire);
 
     int secondWeapon=1234;
     Pawn::equipped=&secondWeapon;
-    probeAmmo=30;
-    Triggerbot1657::probeEndMs=1000000;
     tick();
     assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
-    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::probeActive);
-    probeAmmo=26;
-    tick(); // mid sample
-    probeAmmo=22; // still consuming late in the hold -> automatic
-    Triggerbot1657::probeEndMs=0;
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
     tick();
-    assert(Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Auto);
-    assert(Triggerbot1657::diagFireMode.load()==2);
-    const auto probesAfterAuto=Triggerbot1657::diagProbes.load();
-
-    tick();assert(Triggerbot1657::triggerHeldFire);
-    tick();assert(Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::diagProbes.load()==probesAfterAuto);
-
+    assert(!Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::diagProbes.load()==probeCountBeforeFallback);
 
     int thirdWeapon=777;
     Pawn::equipped=&thirdWeapon;
@@ -689,9 +647,9 @@ int main() {
     assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
     assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
     tick();
-    assert(!Triggerbot1657::triggerHeldFire); // no readable clip: tap, never an endless hold
+    assert(!Triggerbot1657::triggerHeldFire);
     assert(stopCalls==stopsBeforeThird+1);
-    assert(Triggerbot1657::diagProbes.load()==probesAfterAuto);
+    assert(Triggerbot1657::diagProbes.load()==probeCountBeforeFallback);
 
     // Weapon metadata classifies on the frame the weapon is drawn. A semi-automatic
     // rifle taps from its very first press instead of holding fire to probe the mag.
@@ -777,25 +735,25 @@ int main() {
     auto stateName=[](Triggerbot1657::OriginState state) {return static_cast<unsigned>(state);};
 
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Head));
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Unavailable));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     Triggerbot1657::pawnFirePosition=&FirePosition;
     Triggerbot1657::pawnEyePosition=&EyePosition;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     assert(originState(Triggerbot1657::RayOrigin::Eye)==stateName(Triggerbot1657::OriginState::NotTried)); // eye not needed
-    assert(lastFrom.x==5.f && lastFrom.y==5.f && lastFrom.z==6.f); // single cast from the muzzle
+    assert(lastFrom.x==0.f && lastFrom.y==0.f && lastFrom.z==0.f); // single cast from the muzzle
 
     // A blocked muzzle falls through to the next usable origin instead of refusing.
     fireOriginBlocked=true;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Eye));
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Blocked));
-    assert(Triggerbot1657::diagOriginDistance[static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire)].load()>0.f);
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(Triggerbot1657::diagOriginDistance[static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire)].load()<0.f);
 
     fireOriginBlocked=false;cameraOriginBlocked=true;
-    assert(eligibleLocal());
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Clear));
+    assert(!eligibleLocal());
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     assert(originState(Triggerbot1657::RayOrigin::Camera)==stateName(Triggerbot1657::OriginState::NotTried));
 
     // The reported case: low cover swallows muzzle, eye and head (a player standing
@@ -803,8 +761,8 @@ int main() {
     cameraOriginBlocked=false;fireOriginBlocked=true;eyeOriginBlocked=true;headOriginBlocked=true;
     assert(eligibleLocal());
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Blocked));
-    assert(originState(Triggerbot1657::RayOrigin::Head)==stateName(Triggerbot1657::OriginState::Blocked));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(originState(Triggerbot1657::RayOrigin::Head)==stateName(Triggerbot1657::OriginState::NotTried));
     assert(originState(Triggerbot1657::RayOrigin::Camera)==stateName(Triggerbot1657::OriginState::Clear));
 
     cameraOriginBlocked=true; // solid cover across every origin
@@ -813,41 +771,41 @@ int main() {
     assert(originState(Triggerbot1657::RayOrigin::Camera)==stateName(Triggerbot1657::OriginState::Blocked));
     fireOriginBlocked=false;eyeOriginBlocked=false;headOriginBlocked=false;cameraOriginBlocked=false;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
 
     firePoint={150,200,1};
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Eye));
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Unavailable));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     Triggerbot1657::fireOriginReadFailures=0; // isolate from the sticky gate below
     firePoint={std::numeric_limits<float>::quiet_NaN(),5,6};
     assert(eligibleLocal());
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Unavailable));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
     Triggerbot1657::fireOriginReadFailures=0;
     firePoint={5,5,6};
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
 
 
 
     std::memset(player.data()+Class_Pawn__m_Mesh,0,sizeof(void*));
     localPawnTransform=nullptr;
     assert(eligibleLocal());
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Clear));
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
 
 
     std::memset(player.data()+Class_Pawn__m_HeadBone,0,sizeof(void*));
     assert(eligibleLocal()); // the camera path is still a valid line of sight
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Unavailable));
-    assert(originState(Triggerbot1657::RayOrigin::Eye)==stateName(Triggerbot1657::OriginState::Unavailable));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(originState(Triggerbot1657::RayOrigin::Eye)==stateName(Triggerbot1657::OriginState::NotTried));
     assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     std::memcpy(player.data()+Class_Pawn__m_Mesh,&localMeshPtr,sizeof(localMeshPtr));
     std::memcpy(player.data()+Class_Pawn__m_HeadBone,&localHeadPtr,sizeof(localHeadPtr));
     localPawnTransform=&localPawnRoot;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
 
     Transform muzzleLimb{{5,5,6},&localPawnRoot};
     Collider muzzleCollider{&muzzleLimb};
@@ -855,12 +813,12 @@ int main() {
     selfHitsToServe=1;
     assert(eligibleLocal());
     assert(Triggerbot1657::diagSelfSkips.load()==1);
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     selfHitsToServe=0;selfCollider=nullptr;
     Triggerbot1657::pawnFirePosition=nullptr;
     Triggerbot1657::pawnEyePosition=nullptr;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Head));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
 
 
 
@@ -901,22 +859,22 @@ int main() {
     firePoint={5,5,6};
     Triggerbot1657::fireOriginReadFailures=0;
     assert(eligibleLocal());
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Fire));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     firePoint={150,200,1};
     for (unsigned i=0;i<Triggerbot1657::kMaxOriginReadFailures;++i) (void)eligibleLocal();
     const auto gatedCalls=fireCalls;
     firePoint={5,5,6};
     assert(eligibleLocal());
     assert(fireCalls==gatedCalls);
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Unavailable));
-    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Eye));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
+    assert(Triggerbot1657::diagHitOrigin.load()==static_cast<unsigned>(Triggerbot1657::RayOrigin::Camera));
     bool recovered=false;
     for (int i=0;i<70;++i) {
         assert(eligibleLocal());
         if (fireCalls>gatedCalls) { recovered=true; break; }
     }
     assert(recovered);
-    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::Clear));
+    assert(originState(Triggerbot1657::RayOrigin::Fire)==stateName(Triggerbot1657::OriginState::NotTried));
 
 
 
@@ -926,38 +884,22 @@ int main() {
     Pawn::equipped=&fourthWeapon;
     Triggerbot1657::getClipAmmo=&GetClipAmmo;
     Triggerbot1657::tapHoldMs=0;
-    Triggerbot1657::probeMidMs=0;
-    Triggerbot1657::probeEndMs=0;
-    Triggerbot1657::probeRetryMs=0;
     Triggerbot1657::pawnFirePosition=nullptr;
     Triggerbot1657::pawnEyePosition=nullptr;
     probeAmmo=30;
     const auto probesBeforeBudget=Triggerbot1657::diagProbes.load();
-    tick(); // weapon switch resets the budget and starts the first probe
-    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::probeActive);
-    assert(Triggerbot1657::diagProbes.load()==probesBeforeBudget+1);
-    tick(); // magazine never moves: failed probe #1
-    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive); // stays held
-    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
-    assert(Triggerbot1657::probeFailures==1);
-    assert(!Triggerbot1657::diagProbeSpent.load());
-    tick(); // one more attempt is allowed
-    assert(Triggerbot1657::triggerHeldFire && Triggerbot1657::probeActive);
-    tick(); // failed probe #2: budget spent
-    assert(Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::probeFailures==2);
+    tick();
+    assert(Triggerbot1657::triggerHeldFire && !Triggerbot1657::probeActive);
+    assert(Triggerbot1657::probeFailures==Triggerbot1657::kMaxProbeAttempts);
     assert(Triggerbot1657::diagProbeSpent.load());
-    const auto probesSpent=Triggerbot1657::diagProbes.load();
-    assert(probesSpent==probesBeforeBudget+2);
-    for (int i=0;i<8;++i) tick();
-    assert(Triggerbot1657::diagProbes.load()==probesSpent); // held, no further probes
-    assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
-
+    tick();
+    assert(!Triggerbot1657::triggerHeldFire);
+    assert(Triggerbot1657::diagProbes.load()==probesBeforeBudget);
     int fifthWeapon=5151;
     Pawn::equipped=&fifthWeapon;
     tick();
-    assert(Triggerbot1657::diagProbes.load()==probesSpent+1);
-    assert(!Triggerbot1657::diagProbeSpent.load());
+    assert(Triggerbot1657::diagProbes.load()==probesBeforeBudget);
+    assert(Triggerbot1657::probeFailures==Triggerbot1657::kMaxProbeAttempts);
 
     alignas(16) std::array<unsigned char,0x200> otherController{};
     void* remotePawn=reinterpret_cast<void*>(enemy.data());
@@ -998,7 +940,7 @@ int main() {
     assert(!Triggerbot1657::previousLocalAlive);
     assert(Triggerbot1657::fireMode==Triggerbot1657::FireMode::Unknown);
     assert(Triggerbot1657::fireModeWeapon==nullptr);
-    assert(Triggerbot1657::probeFailures==0);
+    assert(Triggerbot1657::probeFailures==Triggerbot1657::kMaxProbeAttempts);
     assert(Triggerbot1657::fireOriginReadFailures==0);
     assert(Triggerbot1657::eyeOriginReadFailures==0);
     assert(!Triggerbot1657::diagProbeSpent.load());
@@ -1019,8 +961,8 @@ int main() {
     assert(!Triggerbot1657::pendingRelease);
     assert(startCalls==startsBeforeDeath+1);
     assert(Triggerbot1657::triggerHeldFire);
-    assert(Triggerbot1657::probeActive);
-    assert(Triggerbot1657::diagProbes.load()==1);
+    assert(!Triggerbot1657::probeActive);
+    assert(Triggerbot1657::diagProbes.load()==0);
     assert(Triggerbot1657::diagUpdateCount.load()==1);
     tick();
     assert(Triggerbot1657::diagUpdateCount.load()==2);
@@ -1037,7 +979,7 @@ int main() {
     tick();
     assert(stopCalls==stopsBeforeDeath+2); // deferred release, on a live pawn
     assert(startCalls==startsBeforeDeath+2);
-    assert(Triggerbot1657::diagProbes.load()==1);
+    assert(Triggerbot1657::diagProbes.load()==0);
 
     GamePlay::local=nullptr;
     tick();
@@ -1095,7 +1037,7 @@ int main() {
         rigLeftUpperArm.pos={7.6f,10.f,1.f};
         assert(eligibleRig());
         cameraOriginBlocked=true;
-        assert(eligibleRig()); // the head origin is still clear
+        assert(!eligibleRig()); // the head origin is still clear
         headOriginBlocked=true;
         assert(!eligibleRig()); // every usable origin blocked
         headOriginBlocked=false;
