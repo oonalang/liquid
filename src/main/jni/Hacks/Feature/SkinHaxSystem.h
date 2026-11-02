@@ -631,9 +631,9 @@ static std::uint32_t HookExtraKillEffectGroup(void* extra) {
     if (Valid(extra)) {
         const auto* bytes=reinterpret_cast<const std::uint8_t*>(extra);
         const std::array<int,3> ids{
-            *reinterpret_cast<const std::uint32_t*>(bytes+0x28), // ItemID
-            *reinterpret_cast<const std::uint32_t*>(bytes+0x20), // VirtualItemID
-            *reinterpret_cast<const std::uint32_t*>(bytes+0x30)  // BluePrintID
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x28)), // ItemID
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x20)), // VirtualItemID
+            static_cast<int>(*reinterpret_cast<const std::uint32_t*>(bytes+0x30))  // BluePrintID
         };
         std::lock_guard<std::mutex> lock(gEffectMutex);
         const int selected=SkinEffectLookup::Find(gActiveKillEffects,ids);
