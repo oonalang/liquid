@@ -5,6 +5,7 @@
 #include "Features/HealthBarOverlay.h"
 #include "Features/EnemyListSnapshot1657.h"
 #include "Features/EnemyReadGuard1657.h"
+#include "Features/EspBoxGuard1657.h"
 #include <cmath>
 #include <iostream>
 #include <malloc.h>
@@ -36,6 +37,7 @@ bool isEspReady;
 // themselves n times, which is where the Hardpoint frame time went.
 static unsigned espFrameSerial = 0;
 static bool espCountPending = false;
+static EspBoxGuard1657::Tracker espBoxGuard;
 
 
 
@@ -494,21 +496,34 @@ ApplySpeedhack();
     if (Config.ESPMenu.Box || Config.ESPMenu.isPlayerLine || Config.ESPMenu.Health || Config.ESPMenu.Name || Config.ESPMenu.Distance || Config.ESPMenu.Alert || Config.ESPMenu.Vehicles || Config.ESPMenu.Count || Config.ESPMenu.Crosshair || Config.ESPMenu.Aimline) {
 
         auto mainCamera = Camera::get_main(); // CAMERA NG PLAYER WHICH IS AKO / POV KO SYEMPRE.
-        if (!mainCamera || !Tools::IsPtrValid(mainCamera)) return;
+        if (!mainCamera || !Tools::IsPtrValid(mainCamera)) {
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+        }
 
         auto Gameplay_get_MatchGame = (uintptr_t (*)())(Class_Gameplay__get_MatchGame);
         auto get_MatchGame = Gameplay_get_MatchGame();
 
-        if (!get_MatchGame || !Tools::IsPtrValid((void*)get_MatchGame)) return;
+        if (!get_MatchGame || !Tools::IsPtrValid((void*)get_MatchGame)) {
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+        }
 
         auto Gameplay_get_LocalPawn = (uintptr_t (*)())(Class_Gameplay__get_LocalPawn);
         auto LocalPawn = Gameplay_get_LocalPawn();
-        if (!LocalPawn || !Tools::IsPtrValid((void*)LocalPawn)) return;
-
-        Vector3 MyPos{0, 0, 0};
-        auto local_m_Mesh = *(Transform **)(LocalPawn + Class_Pawn__m_Mesh);
-        if (local_m_Mesh && Tools::IsPtrValid(local_m_Mesh)) {
-            MyPos = local_m_Mesh->get_position();
+        if (!LocalPawn || !Tools::IsPtrValid((void*)LocalPawn)) {
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+        }
+        bool localAlive=false;
+        if (!EnemyReadGuard1657::ReadFlag(LocalPawn,Pawn_m_IsAlive,localAlive) || !localAlive) {
+            espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+        }
+        // Box-only ESP does not need the local mesh transform.
+        const bool needDistance=Config.ESPMenu.Distance || Config.ESPMenu.Alert || Config.ESPMenu.Name;
+        Vector3 MyPos{0,0,0};
+        if (needDistance) {
+            auto localMesh=*(Transform**)(LocalPawn+Class_Pawn__m_Mesh);
+            if (!localMesh || !Tools::IsPtrValid(localMesh)) return;
+            MyPos=localMesh->get_position();
+            if (!std::isfinite(MyPos.x) || !std::isfinite(MyPos.y) || !std::isfinite(MyPos.z)) return;
         }
 
         if (!isEspReady) {
@@ -516,6 +531,15 @@ ApplySpeedhack();
             totalEnemies = 0;
 
             auto EnemyPawns = *(List<uintptr_t> **)(get_MatchGame + Class_BaseGame__EnemyPawns);
+            if (!EnemyPawns || !Tools::IsPtrValid(EnemyPawns)) {
+                espBoxGuard.Reset(); EnemyReadGuard1657::Reset(); return;
+            }
+            if (!espBoxGuard.Observe({get_MatchGame,LocalPawn,
+                                     reinterpret_cast<std::uintptr_t>(EnemyPawns),
+                                     reinterpret_cast<std::uintptr_t>(mainCamera)})) {
+                EnemyReadGuard1657::Reset();
+                return;
+            }
             EnemyListSnapshot1657::Snapshot enemySnapshot;
             if (!EnemyListSnapshot1657::Read(EnemyPawns,
                     [](const void* pointer) { return Tools::IsPtrValid(const_cast<void*>(pointer)); },
@@ -533,13 +557,13 @@ ApplySpeedhack();
                 bool isAlive = false;
                 if (!EnemyReadGuard1657::ReadFlag(Pawn, Pawn_m_IsAlive, isAlive) || !isAlive) continue;
 
-                auto m_PlayerInfo = *(uintptr_t *)(Pawn + Class_Pawn__m_PlayerInfo);
-                if (!m_PlayerInfo || !Tools::IsPtrValid((void*)m_PlayerInfo)) continue;
-
                 auto m_HeadBone = *(Transform **)(Pawn + Class_Pawn__m_HeadBone);
                 auto m_Mesh = *(Transform **)(Pawn + Class_Pawn__m_Mesh);
                 if (!m_HeadBone || !m_Mesh || !Tools::IsPtrValid(m_HeadBone) ||
                     !Tools::IsPtrValid(m_Mesh)) continue;
+                if (!espBoxGuard.GeometryStable(Pawn,
+                        reinterpret_cast<std::uintptr_t>(m_HeadBone),
+                        reinterpret_cast<std::uintptr_t>(m_Mesh),nowMs)) continue;
 
                 bool isBot = false;
                 if (!EnemyReadGuard1657::ReadFlag(Pawn, Class_Pawn__m_IsBot, isBot)) continue;
@@ -549,11 +573,17 @@ ApplySpeedhack();
                     totalEnemies++;
                 }
 
-                auto HeadSc = WorldToScreenPoint(m_HeadBone->get_position());
-                auto RootSc = WorldToScreenPoint(m_Mesh->get_position());
-
-                float Distance = Vector3::Distance(MyPos, m_HeadBone->get_position());
-                if (Distance > 500 || HeadSc.z <= 0 || RootSc.z <= 0) continue; // Skip out-of-range or invalid entities.
+                const Vector3 headPosition=m_HeadBone->get_position();
+                const Vector3 rootPosition=m_Mesh->get_position();
+                if (!std::isfinite(headPosition.x) || !std::isfinite(headPosition.y) || !std::isfinite(headPosition.z) ||
+                    !std::isfinite(rootPosition.x) || !std::isfinite(rootPosition.y) || !std::isfinite(rootPosition.z)) continue;
+                const auto HeadSc=WorldToScreenPoint(headPosition);
+                const auto RootSc=WorldToScreenPoint(rootPosition);
+                if (!std::isfinite(HeadSc.x) || !std::isfinite(HeadSc.y) || !std::isfinite(HeadSc.z) ||
+                    !std::isfinite(RootSc.x) || !std::isfinite(RootSc.y) || !std::isfinite(RootSc.z) ||
+                    HeadSc.z<=0 || RootSc.z<=0) continue;
+                const float Distance=needDistance ? Vector3::Distance(MyPos,headPosition) : 0.f;
+                if (!std::isfinite(Distance) || (needDistance && Distance>500.f)) continue;
 
 
                 if (isAlive) {
@@ -649,7 +679,9 @@ if (Config.ESPMenu.Box) {
     if (HeadSc.z > 0 && RootSc.z > 0) {
         float boxHeight = fabsf(rootScreen.y - headScreen.y);
         float boxWidth  = boxHeight * 0.65f;
-
+        if (!std::isfinite(boxHeight) || !std::isfinite(boxWidth) ||
+            boxHeight<1.f || boxHeight>static_cast<float>(sHeight)*2.f ||
+            boxWidth>static_cast<float>(sWidth)*2.f) continue;
 
         ImVec2 topLeft(headScreen.x - boxWidth / 2, headScreen.y);
         ImVec2 bottomRight(headScreen.x + boxWidth / 2, headScreen.y + boxHeight);
@@ -689,12 +721,14 @@ if (Config.ESPMenu.Box) {
 
 
                         if (Config.ESPMenu.Name) {
+                            const auto m_PlayerInfo=*(uintptr_t*)(Pawn+Class_Pawn__m_PlayerInfo);
+                            if (!m_PlayerInfo || !Tools::IsPtrValid((void*)m_PlayerInfo)) continue;
                             auto m_NickName = *(String**)(m_PlayerInfo + Class_PlayerInfo__m_NickName);
 
                             int NameColor;
                             char ws[0xFF] = {0};
 
-                            if (m_NickName && m_NickName->CString()) {
+                            if (m_NickName && Tools::IsPtrValid(m_NickName) && m_NickName->CString()) {
                                 snprintf(ws, sizeof(ws), OBFUSCATE(" %s "), m_NickName->CString());
                             } else {
                                 snprintf(ws, sizeof(ws), OBFUSCATE(" UNKNOWN "));
