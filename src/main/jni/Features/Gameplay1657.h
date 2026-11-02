@@ -100,8 +100,8 @@ inline Vector2 HookBreatheTremblingPos(void* self) {
 // exactly zero makes that raise take no time at all: the game starts firing on the
 // frame the sprint ends, while the fire component is still being re-enabled, and any
 // "rate = something / delay" step turns into inf/NaN. Cap it at one hand-off instead:
-// imperceptible, but the game still runs its own transition.
-inline constexpr float kMinSprintToFireDelay = 0.05f;
+// one 60 FPS frame, so the game still runs its transition without a zero divisor.
+inline constexpr float kMinSprintToFireDelay = 0.016f;
 // A weapon created a moment ago has no completed raise to shorten. That is the state
 // right after a respawn or a round change, and enabling the option while dead put this
 // hook exactly there on the next spawn. Keep the game's own delay until the same pawn

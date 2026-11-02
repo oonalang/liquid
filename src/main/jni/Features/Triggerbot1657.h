@@ -168,7 +168,9 @@ inline bool probeMidTaken=false;
 inline std::int64_t probeRetryAfterMs=0;
 
 
-inline unsigned probeFailures=0;
+// When the weapon's own fire-mode metadata is unavailable, use discrete taps.
+ // Never hold the first shot for a timed ammo-based classification probe.
+inline unsigned probeFailures=kMaxProbeAttempts;
 inline std::int64_t nextLegacyDiagnosticProbeMs=0;
 
 inline void ResetLifeState() {
@@ -185,7 +187,7 @@ inline void ResetLifeState() {
     probeMid=0;
     probeMidTaken=false;
     probeRetryAfterMs=0;
-    probeFailures=0;
+    probeFailures=kMaxProbeAttempts;
     fireOriginReadFailures=0;
     eyeOriginReadFailures=0;
     nextLegacyDiagnosticProbeMs=0;
@@ -469,7 +471,6 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
     }
     const Vector3 direction{dx/length,dy/length,dz/length};
     float advanced=0.f;
-    unsigned embeddedSkips=0;
     auto advance=[&](float step) {
         if (!std::isfinite(step) || step<=0.f || advanced+step>=length) return false;
         advanced+=step;
@@ -525,17 +526,9 @@ inline bool LineToTarget(Vector3 from,Vector3 target,const LocalAnchors& own,voi
                 continue;
             }
         }
-        // The ray began on or inside the obstacle (the player is standing flush
-        // against low cover): step out of it instead of reporting an immediate block.
-        if (EmbeddedHit(hit.distance) && advanced<=0.f && embeddedSkips<kMaxEmbeddedSkips) {
-            ++embeddedSkips;
-            if (!advance(kEmbeddedHitStep)) {
-                if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
-                kind=transformValid ? HitKind::Other : HitKind::Unknown;
-                return false;
-            }
-            continue;
-        }
+        // Solid objects are never stepped through. A near-zero hit on a
+        // thin wall remains blocked; only verified local view-model hits
+        // are skipped by the earlier IsLocalPart branch.
         if (blockedCollider) *blockedCollider=reinterpret_cast<std::uintptr_t>(hit.collider);
         kind=transformValid ? HitKind::Other : HitKind::Unknown;
         return false;
@@ -737,6 +730,10 @@ inline bool EligibleFromLocalView(void* weapon, bool ads, bool weaponReady) {
     const OriginCandidate* usable[4]{};
     unsigned usableCount=0;
     for (const auto& candidate : origins) {
+        // A clear path from the head/eye/muzzle does not prove the game can
+        // shoot through a wall visible to the camera. The 1.6.57 projectile
+        // ray is camera based, so accept only that authoritative path.
+        if (candidate.id!=RayOrigin::Camera) continue;
         if (candidate.available) usable[usableCount++]=&candidate;
         else MarkOriginUnavailable(candidate.id);
     }
@@ -1104,8 +1101,10 @@ inline void HookUpdateLocalPawn(void* self, float dt, const void* methodInfo) {
         probeRetryAfterMs=0;
         nextPressMs=0;
         pressReissued=false;
-        probeFailures=!getClipAmmo ? kMaxProbeAttempts : 0;
-        diagProbeSpent.store(probeFailures>=kMaxProbeAttempts,std::memory_order_relaxed);
+        // Metadata is queried at first press. Unknown weapons fall back to
+        // taps, without the 350ms hold and 2s classification retry.
+        probeFailures=kMaxProbeAttempts;
+        diagProbeSpent.store(true,std::memory_order_relaxed);
         if (triggerHeldFire) {
             // Same rule as a round change: never release against a handle that is not
             // readable, keep the release for the first frame that has one.
